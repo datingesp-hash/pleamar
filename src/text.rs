@@ -411,11 +411,28 @@ impl Typesetter {
     }
 
     /// The real pixels an image asks for, and whether that is too big for the
-    /// atlas: then it is a picture of its own, no bigger than the card allows.
+    /// atlas: then it is a picture of its own (`picture_px`).
     fn image_px(&self, (w, h): (u32, u32), budget: u64) -> ((u32, u32), bool) {
         let px = (((w as f32) * self.scale).round().max(1.0) as u32, ((h as f32) * self.scale).round().max(1.0) as u32);
         let big = px.0 > ATLAS_SIZE - 2 || px.1 > ATLAS_SIZE - 2 || px.0 as u64 * px.1 as u64 > budget;
-        (if big { fit_within(px, self.shelves.most) } else { px }, big)
+        (px, big)
+    }
+
+    /// A picture of its own keeps the file's pixels: its box, the shape it
+    /// was declared with, as big as the picture fits in it at one pixel per
+    /// pixel. Never made bigger here (filtering on the card does that as
+    /// well), only smaller if it is bigger than it is ever painted, and no
+    /// bigger than the card allows. An SVG has no pixels: painted at `want`.
+    fn picture_px(&self, path: &std::path::Path, want: (u32, u32)) -> (u32, u32) {
+        let svg = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+        let px = match image::image_dimensions(path) {
+            Ok((w, h)) if !svg => {
+                let k = (w as f32 / want.0 as f32).min(h as f32 / want.1 as f32).min(1.0);
+                (((want.0 as f32) * k).round().max(1.0) as u32, ((want.1 as f32) * k).round().max(1.0) as u32)
+            }
+            _ => want,
+        };
+        fit_within(px, self.shelves.most)
     }
 
     /// A scene's images, at the logical size they ask for times the scale. An
@@ -455,7 +472,10 @@ impl Typesetter {
                     return first;
                 }
                 animations.push(None);
-                let px = if big { big_px } else { px };
+                let px = match (big, &path) {
+                    (true, Some(r)) => self.picture_px(r, big_px),
+                    _ => px,
+                };
                 // One that does not fit is not reported here: the atlas is rebuilt,
                 // taller if it may be, and only what still does not fit is said.
                 let Some(rgba) = path.as_ref().and_then(|r| rasterize_image(r, px, sharp)) else {
@@ -491,8 +511,9 @@ impl Typesetter {
             return self.load_frame(name, size, self.live_px(size), into);
         }
         let (px, big) = self.image_px(size, LIVE_BUDGET);
-        let path = if std::path::Path::new(name).is_absolute() { Some(std::path::PathBuf::from(name)) } else { crate::platform::icon(name) };
-        let rgba = rasterize_image(&path?, px, false)?;
+        let path = if std::path::Path::new(name).is_absolute() { Some(std::path::PathBuf::from(name)) } else { crate::platform::icon(name) }?;
+        let px = if big { self.picture_px(&path, px) } else { px };
+        let rgba = rasterize_image(&path, px, false)?;
         if big {
             return Some(self.picture(px, rgba, into));
         }
@@ -1456,6 +1477,13 @@ mod tests {
         assert!(texts.dropped_pictures.contains(&slot.page));
         assert!(frame(&mut texts, &mut t, &second).is_some_and(|s| s.page > slot.page));
         assert!(texts.atlas_height() == ATLAS_SIZE && !texts.exhausted, "the atlas never saw it");
+        // A photo keeps its own pixels: not made bigger to what was declared,
+        // and made smaller only to it.
+        let photo = dir.join("photo.png");
+        image::RgbaImage::new(3840, 2160).save(&photo).unwrap();
+        assert_eq!(t.picture_px(&photo, (4128, 2322)), (3840, 2160));
+        assert_eq!(t.picture_px(&photo, (2752, 1548)), (2752, 1548));
+        assert_eq!(t.picture_px(&photo, (4128, 1728)), (3840, 1607), "the box keeps its shape");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
