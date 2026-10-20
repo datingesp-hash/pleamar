@@ -411,11 +411,25 @@ impl Typesetter {
     }
 
     /// The real pixels an image asks for, and whether that is too big for the
-    /// atlas: then it is a picture of its own (`picture_px`).
-    fn image_px(&self, (w, h): (u32, u32), budget: u64) -> ((u32, u32), bool) {
-        let px = (((w as f32) * self.scale).round().max(1.0) as u32, ((h as f32) * self.scale).round().max(1.0) as u32);
+    /// atlas: then it is a picture of its own (`picture_px`). Declared `0, 0`,
+    /// the file's own: its pixels, or an SVG's size times the scale.
+    fn image_px(&self, path: Option<&std::path::Path>, (w, h): (u32, u32), budget: u64) -> ((u32, u32), bool) {
+        let px = if (w, h) == (0, 0) {
+            fit_within(path.and_then(|p| self.own_px(p)).unwrap_or((1, 1)), self.shelves.most)
+        } else {
+            (((w as f32) * self.scale).round().max(1.0) as u32, ((h as f32) * self.scale).round().max(1.0) as u32)
+        };
         let big = px.0 > ATLAS_SIZE - 2 || px.1 > ATLAS_SIZE - 2 || px.0 as u64 * px.1 as u64 > budget;
         (px, big)
+    }
+
+    fn own_px(&self, path: &std::path::Path) -> Option<(u32, u32)> {
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
+            let tree = resvg::usvg::Tree::from_data(&std::fs::read(path).ok()?, &resvg::usvg::Options::default()).ok()?;
+            let s = tree.size();
+            return Some(((s.width() * self.scale).round().max(1.0) as u32, (s.height() * self.scale).round().max(1.0) as u32));
+        }
+        image::image_dimensions(path).ok().filter(|&(w, h)| w > 0 && h > 0)
     }
 
     /// A picture of its own keeps the file's pixels: its box, the shape it
@@ -442,8 +456,6 @@ impl Typesetter {
         let slots = images
             .iter()
             .map(|(source, size)| {
-                let (big_px, big) = self.image_px(*size, u64::MAX);
-                let px = fit_side(big_px);
                 let path = match source {
                     ImageSource::File(r) | ImageSource::Pixels(r) => Some(r.clone()),
                     ImageSource::Icon(name) => crate::platform::icon(name),
@@ -453,6 +465,8 @@ impl Typesetter {
                         return None;
                     }
                 };
+                let (big_px, big) = self.image_px(path.as_deref(), *size, u64::MAX);
+                let px = fit_side(big_px);
                 // A file that moves —a GIF, an animated PNG or WebP—: each frame to
                 // the atlas, with the moment it ends.
                 let sharp = matches!(source, ImageSource::Pixels(_));
@@ -510,8 +524,8 @@ impl Typesetter {
         if name.starts_with("thumbnails:") {
             return self.load_frame(name, size, self.live_px(size), into);
         }
-        let (px, big) = self.image_px(size, LIVE_BUDGET);
         let path = if std::path::Path::new(name).is_absolute() { Some(std::path::PathBuf::from(name)) } else { crate::platform::icon(name) }?;
+        let (px, big) = self.image_px(Some(&path), size, LIVE_BUDGET);
         let px = if big { self.picture_px(&path, px) } else { px };
         let rgba = rasterize_image(&path, px, false)?;
         if big {
@@ -1484,6 +1498,9 @@ mod tests {
         assert_eq!(t.picture_px(&photo, (4128, 2322)), (3840, 2160));
         assert_eq!(t.picture_px(&photo, (2752, 1548)), (2752, 1548));
         assert_eq!(t.picture_px(&photo, (4128, 1728)), (3840, 1607), "the box keeps its shape");
+        // Declared `0, 0`: the file's own size and shape, whatever the scale.
+        t.clear(1.5);
+        assert_eq!(t.image_px(Some(&photo), (0, 0), LIVE_BUDGET), ((3840, 2160), true));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

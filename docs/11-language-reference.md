@@ -249,7 +249,7 @@ scene Watching {
 | `fact open = false` · `fact tries: number = 3` · `fact mode: low \| normal \| critical = normal` | Something that is true for a while. The logic and the rules set it. See **Types**, below |
 | `event confirmed` · `event view_event ->` | Something that happens. With `->`, it also reaches the logic |
 | `text notice.title = "Meeting"` | A live text: the logic changes it, or an `input` |
-| `image fox = icon "firefox", 48, 48` | An image, and the largest logical size it is painted at. `icon "name"`, `file "path"`, or `from some_text`: whichever that text says (an icon name, or a path if it starts with `/`). A `file` that moves —a **GIF, an animated PNG or an animated WebP**— plays by itself, looping; the render wakes up only when it changes frame, it stops while the image is not seen, and with reduced motion it stays on its first frame. Its frames go to the atlas at the size it is painted, up to a quarter of it: one that asks for more keeps one frame in two —or three…—, at the same pace. **The declared size fixes the shape of the image's cell**: the picture is fitted inside a box of that shape, keeping its proportions, and that box is then stretched to the `size:` it is drawn at. Declare it with the proportions it is drawn at, or a picture of another shape is squashed, or leaves empty bands |
+| `image fox = icon "firefox", 48, 48` | An image, and the largest logical size it is painted at. `icon "name"`, `file "path"`, or `from some_text`: whichever that text says (an icon name, or a path if it starts with `/`). A `file` that moves —a **GIF, an animated PNG or an animated WebP**— plays by itself, looping; the render wakes up only when it changes frame, it stops while the image is not seen, and with reduced motion it stays on its first frame. Its frames go to the atlas at the size it is painted, up to a quarter of it: one that asks for more keeps one frame in two —or three…—, at the same pace. **The declared size fixes the shape of the image's cell**: the picture is fitted inside a box of that shape, keeping its proportions, and that box is then stretched to the `size:` it is drawn at. Declare it with the proportions it is drawn at, or a picture of another shape is squashed, or leaves empty bands. Declared `0, 0`, it is the file's own size and shape (see `fit:` below) |
 | `figure hat = file "hat.svg"` | An svg **as geometry**: its layers become paths, each one named by the `id` of its group in the file. The path is relative to the file that writes it, so a library takes its pieces with it |
 | `shader aurora = file "aurora.wgsl"` | One of the scene's **own shaders**: a function in WGSL that paints a box, point by point. It is read and checked when the scene is read, and touching the file reloads it, like an svg. How it is written, in §8.1 |
 | `measure label` | Creates `label.width` and `label.height`, filled by the text that carries `measure: label` |
@@ -509,7 +509,7 @@ Each element accepts these properties and no others; another one is an error, wi
 | …and every shape | `color` · `opacity` · `rotate` · `stroke` (the outline only) · `blend` (inside a `body`: how much it melts into what came before) · `active` · `cursor` · `carries` · `carry_icon` (below) · `show` · `label` · `agent` · `role` · `value` · `checked` · `selected` (§13, *Told to an agent*) |
 | `body` | `color` or `gradient` (below) · `rim` · `light: amount, from_y, height` · `shadow: dx, dy, blur, alpha[, color]` · `border: width, #color` · `glass` · `lens` · `opacity` · `show`, and inside it its shapes, melted into one silhouette |
 | `text` | `at` · `anchor` · `width` · `lines` · `size` · `weight` · `color` · `opacity` · `align:` `left` `center` `right` · `line_height` · `family` · `measure` · `show` · and its effects: `gradient` · `outline` · `shadow` · `letter_move` · `letter_opacity` · `letter_scale` (§8.4) · `selectable` · `selection` · `markdown` |
-| `image` | `at` (its **top-left corner**, not its centre: it is a rectangle of pixels, not a shape) · `size` · `opacity` · `tint` · `cell: which, columns, rows` (one picture of a sheet: below) · `show` |
+| `image` | `at` (its **top-left corner**, not its centre: it is a rectangle of pixels, not a shape) · `size` · `opacity` · `tint` · `cell: which, columns, rows` (one picture of a sheet: below) · `fit: fill`, `contain` or `cover` (below) · `show` |
 | `particles` | `at` · `area` · `count` · `life` · `speed` · `direction` · `spread` · `gravity` · `drag` · `size` · `colors` · `opacity` · `shape` · `emit` or `burst` · `show`: §8.3 |
 | `shader` | `at` (its top left corner) · `size: w, h` · `corner` · `opacity` · `show` · `values: a, b, …` (up to eight numbers, any expression) · `colors: c1, c2` (up to two). What it is and how it is written: §8.1 |
 | `figure` | `at` (where the piece's centre goes) · `size: w, h` or `scale:` (without either, one unit of the svg is one pixel) · `pivot: x, y` (in the svg's units, from its centre: the point it **turns** around, which does not move it) · `rotate` · `color` (instead of the one in the file) · `opacity` · `blend` · `stroke` · `show` |
@@ -671,6 +671,17 @@ it is drawn —eight frames of 64 across are `512, 64`— and draw it with the
 size of one. Each picture wants a pixel of nothing round it, as sheets
 usually have, or its neighbour shows at its edge when it lands between two
 pixels of the screen.
+
+**Its own shape, and a box of another: `0, 0` and `fit:`.** Declared `0, 0`,
+an image is the file's own size and shape: its pixels as they are, whatever
+the scale (an SVG, its size times the scale). Drawn, it is stretched to its
+`size:` (`fit: fill`, the default) unless it says otherwise: `fit: contain`
+keeps its shape whole inside the box, `fit: cover` keeps its shape and cuts
+what overflows the box, centred. A wallpaper is one picture covering each
+monitor, whatever its shape, from the file's own pixels:
+`image back = from wall, 0, 0` and `image back { at: 0, 0; size:
+screen.width, screen.height; fit: cover }`. The shape `fit:` keeps is the
+image's cell: with a declared size, that one (and a sheet's `cell:`).
 
 **Pixel art: `pixels "hero.png"`** instead of `file`. A picture made bigger
 is smoothed, which is what a photograph wants and what a 16 × 16 knight does
@@ -1627,7 +1638,7 @@ properties.line: from to width
 properties.path: at size
 properties.body: color gradient rim light shadow border glass lens shine refraction dispersion dome ripple frost smoke milk tint vivid mirror highlight opacity show
 properties.text: at anchor width size weight color opacity lines align line_height family measure show grow gradient outline shadow letter_move letter_opacity letter_scale selectable selection markdown
-properties.image: at size opacity tint cell show grow
+properties.image: at size opacity tint cell fit show grow
 properties.window: at size ask opacity show
 properties.figure: at size scale rotate pivot color opacity blend stroke show grow
 properties.shader: at size corner opacity show values colors grow
@@ -1682,6 +1693,7 @@ role: button toggle slider tab link item list region
 text.align: left center right
 layout.align: start center end
 group.mode: normal add screen multiply
+image.fit: fill contain cover
 particles.shape: dot square spark
 ```
 

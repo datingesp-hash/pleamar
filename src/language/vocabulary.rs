@@ -29,7 +29,7 @@ pub const PROPERTIES: &[(&str, &[&str])] = &[
     ("path", &["at", "size"]),
     ("body", &["color", "gradient", "rim", "light", "shadow", "border", "glass", "lens", "shine", "refraction", "dispersion", "dome", "ripple", "frost", "smoke", "milk", "tint", "vivid", "mirror", "highlight", "opacity", "show"]),
     ("text", &["at", "anchor", "width", "size", "weight", "color", "opacity", "lines", "align", "line_height", "family", "measure", "show", "grow", "gradient", "outline", "shadow", "letter_move", "letter_opacity", "letter_scale", "selectable", "selection", "markdown"]),
-    ("image", &["at", "size", "opacity", "tint", "cell", "show", "grow"]),
+    ("image", &["at", "size", "opacity", "tint", "cell", "fit", "show", "grow"]),
     ("window", &["at", "size", "ask", "opacity", "show"]),
     ("figure", &["at", "size", "scale", "rotate", "pivot", "color", "opacity", "blend", "stroke", "show", "grow"]),
     ("shader", &["at", "size", "corner", "opacity", "show", "values", "colors", "grow"]),
@@ -179,6 +179,8 @@ pub const TEXT_ALIGNS: &[&str] = &["left", "center", "right"];
 pub const STACK_ALIGNS: &[&str] = &["start", "center", "end"];
 /// How a group with effects blends: covering, or adding light.
 pub const GROUP_MODES: &[&str] = &["normal", "add", "screen", "multiply"];
+/// How an image fills the box it is drawn in: stretched, whole inside it, or cut to cover it.
+pub const IMAGE_FITS: &[&str] = &["fill", "contain", "cover"];
 /// What each particle looks like.
 pub const PARTICLE_SHAPES: &[&str] = &["dot", "square", "spark"];
 
@@ -228,6 +230,7 @@ pub fn to_text() -> String {
     line("text.align", TEXT_ALIGNS);
     line("layout.align", STACK_ALIGNS);
     line("group.mode", GROUP_MODES);
+    line("image.fit", IMAGE_FITS);
     line("particles.shape", PARTICLE_SHAPES);
     s
 }

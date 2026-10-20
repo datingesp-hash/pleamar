@@ -1393,7 +1393,7 @@ impl DrawList {
                         glass_options(e, glass_spec.as_ref(), b, c);
                     });
                 }
-                Instr::Image { image, target, alpha, tint, cell } => {
+                Instr::Image { image, target, alpha, tint, cell, fit } => {
                     let a = alpha.eval(c).clamp(0.0, 1.0) * mult;
                     // What is not seen does not move either: no frame, no waking up.
                     if a <= 0.001 {
@@ -1414,6 +1414,19 @@ impl DrawList {
                         let (x, y) = (which % columns, (which / columns).floor());
                         let (w, h) = ((uv[2] - uv[0]) / columns, (uv[3] - uv[1]) / rows);
                         uv = [uv[0] + x * w, uv[1] + y * h, uv[0] + (x + 1.0) * w, uv[1] + (y + 1.0) * h];
+                    }
+                    // Not stretched: the picture's shape kept, whole inside its box
+                    // (the box made smaller) or covering it (the picture cut).
+                    let mut d = d;
+                    let (pw, ph) = (uv[2] - uv[0], uv[3] - uv[1]);
+                    if *fit > 0 && pw > 0.0 && ph > 0.0 && d[2] > 0.0 && d[3] > 0.0 {
+                        let k = (pw / ph) / (d[2] / d[3]);
+                        match (*fit, k > 1.0) {
+                            (1, true) => (d[1], d[3]) = (d[1] + (d[3] - d[3] / k) * 0.5, d[3] / k),
+                            (1, false) => (d[0], d[2]) = (d[0] + (d[2] - d[2] * k) * 0.5, d[2] * k),
+                            (_, true) => (uv[0], uv[2]) = (uv[0] + (pw - pw / k) * 0.5, uv[0] + (pw + pw / k) * 0.5),
+                            (_, false) => (uv[1], uv[3]) = (uv[1] + (ph - ph * k) * 0.5, uv[1] + (ph + ph * k) * 0.5),
+                        }
                     }
                     // Pixel art stays pixels however a group enlarges it.
                     let sharp = tip.is_pixel_art(image.0 as usize);
