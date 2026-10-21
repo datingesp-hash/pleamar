@@ -165,6 +165,12 @@ pub fn command(from: &str, name: &str, args: &[SysValue]) -> Result<(), String> 
     if name.starts_with("files.") {
         return files::command(from, name, args);
     }
+    if name == "say" {
+        return match args {
+            [SysValue::Text(scene), SysValue::Text(line)] => say(scene, line),
+            _ => Err("`say` takes the scene and one command: sys.call(\"say\", \"bar\", \"emit card_landed 3\")".into()),
+        };
+    }
     if let ("clipboard.set", [SysValue::Text(t)]) = (name, args) {
         clipboard_write(t);
         return Ok(());
@@ -592,6 +598,10 @@ fn reach(scene: &str) -> Result<(std::path::PathBuf, Option<String>), String> {
 /// next to Hyprland) gives its programs another place, so that `marea
 /// search` there reaches its own Marea and not the other desktop's—.
 fn command_socket_path(scene: &str) -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = tests::SOCKETS.with(|d| d.borrow().clone()) {
+        return Some(dir.join(format!("{scene}.sock")));
+    }
     let dir = match std::env::var("PLEAMAR_SOCKETS").ok().filter(|d| !d.is_empty()) {
         Some(d) => std::path::PathBuf::from(d),
         None => std::path::Path::new(&std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned())).join("pleamar"),
@@ -684,6 +694,148 @@ pub fn send(scene: Option<&str>, commands: &[String]) -> Result<(), String> {
         let _ = std::io::stdout().flush();
     }
     Ok(())
+}
+
+/// One scene telling another one of `--say`'s commands: `sys.call("say",
+/// "bar", "emit card_landed 3")`. The same socket and the same words, so the
+/// other scene needs nothing new to be told. What it answers is not brought
+/// back, except a `? …`, which is the error: so is a scene that is not there,
+/// rather than a word lost on the way.
+#[cfg(unix)]
+pub fn say(scene: &str, command: &str) -> Result<(), String> {
+    // The name becomes a path: it stays a name.
+    if scene.is_empty() || scene.starts_with('.') || scene.contains(['/', '\0']) {
+        return Err(format!("'{scene}' is not the name of a scene"));
+    }
+    // One call, one command: a second line would be a second one, unasked for.
+    if command.contains(['\n', '\r']) {
+        return Err("`say` takes one command, on one line: call it again for the next".into());
+    }
+    // A write this small goes as one buffer, whole or not at all (Linux's Unix
+    // stream sockets): a line cut short by the deadline would be run as it stands.
+    if command.len() >= SAY_LONGEST {
+        return Err(format!("`say` takes a command of under {SAY_LONGEST} bytes"));
+    }
+    // Finding the scene connects to sockets too, and so blocks like the rest:
+    // it goes on the exchange's thread, under its second.
+    #[cfg(test)]
+    let here = tests::SOCKETS.with(|d| d.borrow().clone());
+    let name = scene.to_owned();
+    let find = move || {
+        #[cfg(test)]
+        tests::SOCKETS.with(|d| *d.borrow_mut() = here);
+        let (path, word) = reach(&name)?;
+        // The word `--say` gives too: the scene told is shown on another display.
+        if let Some(w) = word {
+            eprintln!("{}", w.replace("this terminal's display", "the display of the scene telling it"));
+        }
+        Ok(path)
+    };
+    say_at(scene, command, find, running_scenes)
+}
+#[cfg(unix)]
+const SAY_LONGEST: usize = 4096;
+#[cfg(not(unix))]
+pub fn say(_: &str, _: &str) -> Result<(), String> {
+    Err("this system has nowhere to receive commands yet".into())
+}
+
+#[cfg(unix)]
+fn say_at(scene: &str, command: &str, find: impl FnOnce() -> Result<std::path::PathBuf, String> + Send + 'static, others: fn() -> Vec<String>) -> Result<(), String> {
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+    // One second in all, for the whole exchange. Connecting to a scene that has
+    // stopped taking calls (its queue full) or writing to one that stopped
+    // reading blocks, and a native call cannot be cut off by the logic's
+    // patience: so the exchange goes on a thread of its own, and the logic
+    // waits for it no longer than that. A thread left blocked ends when that
+    // scene takes the call or goes away, without writing: an error the logic
+    // was given means the order was not delivered, and calling again does not
+    // deliver it twice. Who goes first decides, under one lock: the thread
+    // starting to write, or the logic giving up.
+    const WAITING: u8 = 0;
+    const WRITING: u8 = 1;
+    const GIVEN_UP: u8 = 2;
+    let until = Instant::now() + Duration::from_secs(1);
+    let (tx, rx) = std::sync::mpsc::channel::<Result<bool, String>>();
+    let phase = std::sync::Arc::new(std::sync::Mutex::new(WAITING));
+    let (who, line, worker) = (scene.to_owned(), format!("{command}\n"), std::sync::Arc::clone(&phase));
+    std::thread::spawn(move || {
+        let path = match find() {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = tx.send(Err(e));
+                return;
+            }
+        };
+        // No socket, or one left behind by a scene that ended: nobody to tell.
+        let Ok(mut s) = std::os::unix::net::UnixStream::connect(&path) else {
+            let _ = tx.send(Err(match others() {
+                o if o.is_empty() => format!("the scene '{who}' is not running"),
+                o => format!("the scene '{who}' is not running (running: {})", o.join(", ")),
+            }));
+            return;
+        };
+        {
+            let mut p = worker.lock().unwrap();
+            if *p == GIVEN_UP || Instant::now() >= until {
+                *p = GIVEN_UP;
+                return;
+            }
+            *p = WRITING;
+        }
+        let _ = s.set_write_timeout(Some(until.saturating_duration_since(Instant::now()).max(Duration::from_millis(1))));
+        // One write: `writeln!` would make two, and the second could miss the deadline.
+        if let Err(e) = s.write_all(line.as_bytes()) {
+            let _ = tx.send(Err(format!("'{who}': {e}")));
+            return;
+        }
+        let _ = s.shutdown(std::net::Shutdown::Write);
+        let _ = tx.send(Ok(false));
+        // An order answers nothing and the connection closes at once; a `? …`
+        // comes as fast. Whatever takes longer (`wait`, `watch`) is not waited
+        // for: the logic does not stand still for another scene. The deadline
+        // holds across reads: a `watch` that keeps talking would otherwise hold
+        // it for as long as it talks.
+        let mut answer = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() || s.set_read_timeout(Some(left)).is_err() {
+                break;
+            }
+            match std::io::Read::read(&mut s, &mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => answer.extend_from_slice(&chunk[..n]),
+            }
+        }
+        let _ = tx.send(match String::from_utf8_lossy(&answer).lines().find_map(|l| l.strip_prefix("? ").map(str::to_owned)) {
+            Some(wrong) => Err(format!("'{who}' answers: {wrong}")),
+            None => Ok(true),
+        });
+    });
+    let left = || until.saturating_duration_since(Instant::now());
+    // Not even taken within the second: the order did not get there.
+    let delivered = match rx.recv_timeout(left()) {
+        Err(_) => {
+            let mut p = phase.lock().unwrap();
+            // Given up by the worker itself (connected too late) is as sure a miss.
+            if *p != WRITING {
+                *p = GIVEN_UP;
+                return Err(format!("the scene '{scene}' did not take the order within a second"));
+            }
+            drop(p);
+            // The write began in time and has until the second to end: its outcome comes.
+            rx.recv_timeout(Duration::from_millis(100)).map_err(|_| format!("'{scene}' was still being told when the second ran out: it may have the order"))?
+        }
+        Ok(r) => r,
+    };
+    delivered?;
+    // Taken: only a `? …` is an error; one still waiting at the second is not.
+    match rx.recv_timeout(left() + Duration::from_millis(50)) {
+        Ok(Err(e)) => Err(e),
+        _ => Ok(()),
+    }
 }
 
 #[cfg(not(unix))]
@@ -1131,4 +1283,138 @@ pub use wayland::icon;
 #[cfg(not(target_os = "linux"))]
 pub fn icon(_: &str) -> Option<std::path::PathBuf> {
     None
+}
+
+#[cfg(all(test, unix))]
+pub(crate) mod tests {
+    use super::{say, say_at};
+    use std::io::{BufRead, BufReader, Write};
+
+    /// The socket found, without looking: a stand-in's.
+    fn at(path: &std::path::Path) -> impl FnOnce() -> Result<std::path::PathBuf, String> + Send + 'static {
+        let p = path.to_owned();
+        move || Ok(p)
+    }
+    fn nobody() -> Vec<String> {
+        Vec::new()
+    }
+
+    thread_local! {
+        /// Where this test thread's scenes listen, instead of the real ones'.
+        pub(crate) static SOCKETS: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_scene_that_takes_no_calls_holds_the_caller_one_second_in_all() {
+        use std::os::fd::AsRawFd;
+        let dir = std::env::temp_dir().join(format!("pleamar-say-full-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bar.sock");
+        // A scene stuck: it never accepts, and its queue is as short as it gets.
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        let (filler, stop) = (path.clone(), std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let stopped = std::sync::Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            while !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                let Ok(s) = std::os::unix::net::UnixStream::connect(&filler) else { break };
+                held.push(s);
+            }
+            // Held, never closed: the one that closes is say's.
+            std::thread::park();
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let t = std::time::Instant::now();
+        assert_eq!(say_at("bar", "emit x", at(&path), nobody), Err("the scene 'bar' did not take the order within a second".into()));
+        let took = t.elapsed();
+        assert!(took < std::time::Duration::from_millis(1500), "held for {took:?}");
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        // The scene comes back and takes its calls: say's connection is among
+        // them (it is the one that closes), and it brings nothing.
+        listener.set_nonblocking(true).unwrap();
+        let back = std::time::Instant::now();
+        let mut says = None;
+        while says.is_none() {
+            assert!(back.elapsed() < std::time::Duration::from_secs(5), "say's connection was never taken: the test proves nothing");
+            match listener.accept() {
+                Ok((mut c, _)) => {
+                    c.set_nonblocking(false).unwrap();
+                    c.set_read_timeout(Some(std::time::Duration::from_millis(50))).unwrap();
+                    let mut heard = String::new();
+                    if std::io::Read::read_to_string(&mut c, &mut heard).is_ok() {
+                        says = Some(heard);
+                    }
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+        assert_eq!(says.as_deref(), Some(""), "delivered after the caller was told it was not");
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_watch_that_keeps_talking_holds_the_caller_one_second_in_all() {
+        let dir = std::env::temp_dir().join(format!("pleamar-say-drip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bar.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        // A `watch` that answers a line every 200 ms, for ten seconds.
+        std::thread::spawn(move || {
+            if let Some(mut c) = listener.incoming().map_while(Result::ok).next() {
+                for i in 0..50 {
+                    if writeln!(c, "bar.level {i}").is_err() {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
+        });
+        let t = std::time::Instant::now();
+        assert_eq!(say_at("bar", "watch 10s bar.level", at(&path), nobody), Ok(()));
+        let took = t.elapsed();
+        assert!(took < std::time::Duration::from_millis(1500), "held for {took:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_scene_tells_another_and_hears_only_what_went_wrong() {
+        let dir = std::env::temp_dir().join(format!("pleamar-say-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A stand-in for a scene's listener: it answers as `--say`'s does, nothing to an order.
+        let path = dir.join("bar.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let (heard, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for c in listener.incoming().map_while(Result::ok) {
+                let mut w = c.try_clone().unwrap();
+                for line in BufReader::new(c).lines().map_while(Result::ok) {
+                    if !line.starts_with("emit ") {
+                        let _ = writeln!(w, "? I don't understand '{line}'");
+                    }
+                    heard.send(line).unwrap();
+                }
+            }
+        });
+        assert_eq!(say_at("bar", "emit card_landed 3", at(&path), nobody), Ok(()));
+        assert_eq!(lines.recv().unwrap(), "emit card_landed 3");
+        assert_eq!(say_at("bar", "emitt card_landed", at(&path), nobody), Err("'bar' answers: I don't understand 'emitt card_landed'".into()));
+
+        // Not there: no socket, or one a scene that ended left behind.
+        assert_eq!(say_at("toasts", "emit x", at(&dir.join("toasts.sock")), nobody), Err("the scene 'toasts' is not running".into()));
+        let left = dir.join("osd.sock");
+        drop(std::os::unix::net::UnixListener::bind(&left).unwrap());
+        assert_eq!(say_at("osd", "emit x", at(&left), nobody), Err("the scene 'osd' is not running".into()));
+
+        // A name stays a name, and one call is one command.
+        assert!(say("../bar", "emit x").is_err());
+        assert!(say("bar", "emit x\nquit").is_err());
+        assert!(say("bar", &format!("emit {}", "x".repeat(4096))).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
