@@ -2168,7 +2168,7 @@ pub fn run(
                     // On the letters of a text that can be selected, the press
                     // selects —unless a button, a field or something to carry
                     // out is on top of them: that one keeps its click—.
-                    let keeps = hovered.and_then(|k| scene.zones.get(k)).is_some_and(|z| z.cursor == Cursor::Hand || z.carries.is_some() || draw.fields.iter().any(|f| f.zone == z.id));
+                    let keeps = hovered.and_then(|k| scene.zones.get(k)).is_some_and(|z| z.cursor_in(Ctx { props: &props, facts: &facts, seen: None }) == Cursor::Hand || z.carries.is_some() || draw.fields.iter().any(|f| f.zone == z.id));
                     let on_text = if keeps { None } else { pointer.and_then(|p| draw.selectable.iter().rev().find(|t| t.contains(p.0, p.1)).map(|t| (t, p))) };
                     if let Some((t, p)) = on_text {
                         let (lx, ly) = t.local(p.0, p.1);
@@ -2590,7 +2590,7 @@ pub fn run(
         }
 
         // The cursor, the one of the zone it is over.
-        let wanted = drag.map(|a| a.0).or(hovered).and_then(|k| scene.zones.get(k)).map_or(Cursor::Normal, |z| z.cursor);
+        let wanted = drag.map(|a| a.0).or(hovered).and_then(|k| scene.zones.get(k)).map_or(Cursor::Normal, |z| z.cursor_in(Ctx { props: &props, facts: &facts, seen: None }));
         // Over letters that can be selected, or selecting them, the text one.
         let wanted = if selection.as_ref().is_some_and(|s| s.dragging)
             || (wanted == Cursor::Normal && drag.is_none() && pointer.is_some_and(|p| draw.selectable.iter().any(|t| t.contains(p.0, p.1))))
