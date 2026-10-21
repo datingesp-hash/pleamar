@@ -453,7 +453,7 @@ impl Typesetter {
     /// With `into`, a new version of one already loaded, painted over it.
     fn load_live(&mut self, name: &str, size: (u32, u32), into: Option<AtlasSlot>) -> Option<AtlasSlot> {
         let px = self.live_px(size);
-        if name.starts_with("thumbnails:") {
+        if name.starts_with("thumbnails:") || name.starts_with("capture:") {
             return self.load_frame(name, size, px, into);
         }
         let path = if std::path::Path::new(name).is_absolute() { Some(std::path::PathBuf::from(name)) } else { crate::platform::icon(name) };
@@ -466,7 +466,8 @@ impl Typesetter {
         Some(slot)
     }
 
-    /// A live window's frame (`thumbnails.live`): from memory, no file, made
+    /// A live window's frame (`thumbnails.live`) or a frozen monitor
+    /// (`capture.freeze`): from memory, no file, made
     /// the size it is drawn at. Several versions asked for while one was being
     /// made are one: what is kept is always the last, so the rest find it drawn.
     fn load_frame(&mut self, name: &str, size: (u32, u32), px: (u32, u32), into: Option<AtlasSlot>) -> Option<AtlasSlot> {
@@ -1079,6 +1080,14 @@ mod tests {
 
     fn frame(width: u32, height: u32, bgra: [u8; 4], opaque: bool) -> crate::platform::ThumbnailFrame {
         crate::platform::ThumbnailFrame { version: 1, width, height, pixels: bgra.repeat((width * height) as usize), opaque, card: None }
+    }
+
+    #[test]
+    fn a_frozen_monitor_is_looked_up_without_its_version() {
+        // What capture.freeze answers; the base is what capture::frame finds.
+        assert_eq!(live_name("capture:HEADLESS-1?12"), ("capture:HEADLESS-1", "12"));
+        assert_eq!(live_name("capture:DP-1"), ("capture:DP-1", ""));
+        assert_eq!(live_name("capture:DP-1?"), ("capture:DP-1?", ""));
     }
 
     #[test]
