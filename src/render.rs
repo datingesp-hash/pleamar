@@ -3880,14 +3880,16 @@ pub fn run(
         g.check_thumbnails();
         // What was uploaded to the atlas may take the slot of something that is no longer there: with
         // a new atlas, any letter may have changed without changing its `uv`.
-        if !letters.pending_upload.is_empty() || !letters.pending_fit.is_empty() {
+        // A picture of its own painted again keeps its number, and so its element.
+        if !letters.pending_upload.is_empty() || !letters.pending_fit.is_empty() || !letters.pending_pictures.is_empty() {
             previous.forget();
             compose_memo = None;
         }
         // (What is written to the card waits in memory for the next thing submitted to it.)
-        let wrote = !letters.pending_upload.is_empty() || !same_scene;
+        let wrote = !letters.pending_upload.is_empty() || !letters.pending_pictures.is_empty() || !same_scene;
         g.fit_atlas(letters.atlas_height());
         g.upload_atlas(&mut letters.pending_upload);
+        g.upload_pictures(&mut letters.pending_pictures, &mut letters.dropped_pictures);
         #[cfg(target_os = "linux")]
         g.fit_thumbnails(&mut letters.pending_fit);
         #[cfg(not(target_os = "linux"))]

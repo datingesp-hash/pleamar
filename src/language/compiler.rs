@@ -3783,7 +3783,14 @@ impl<'a> Compiler<'a> {
             }
             None => None,
         };
-        self.e.paint(Instr::Image { image, target: (x, y, w, h), alpha, tint, cell });
+        let fit = match p.get_mut("fit") {
+            Some(c) => {
+                let word = c.one_of(vocab::IMAGE_FITS, "how an image fills its box")?;
+                vocab::IMAGE_FITS.iter().position(|m| *m == word).unwrap_or(0) as u8
+            }
+            None => 0,
+        };
+        self.e.paint(Instr::Image { image, target: (x, y, w, h), alpha, tint, cell, fit });
         Ok(())
     }
 

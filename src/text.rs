@@ -19,13 +19,15 @@ pub const ATLAS_SIZE: u32 = 2048;
 /// The tallest it grows to when what is seen does not fit: 2048×8192, 64 MB.
 pub const ATLAS_MOST: u32 = 8192;
 
-/// A piece of the atlas, in pixels.
+/// A piece of the atlas, in pixels. With `page` above 0, not the atlas but
+/// a picture of its own: one too big for the atlas, the whole of that texture.
 #[derive(Clone, Copy, Debug)]
 pub struct AtlasSlot {
     pub x: u32,
     pub y: u32,
     pub width: u32,
     pub height: u32,
+    pub page: u32,
 }
 
 impl AtlasSlot {
@@ -203,7 +205,7 @@ impl Shelves {
                 (y, 1)
             }
         };
-        Some(AtlasSlot { x, y, width, height })
+        Some(AtlasSlot { x, y, width, height, page: 0 })
     }
 }
 
@@ -219,6 +221,10 @@ struct Typesetter {
     pending_upload: Vec<(AtlasSlot, Vec<u8>)>,
     /// Live windows' frames on the card, for the render to make small into the atlas.
     pending_fit: Vec<Fit>,
+    /// Pictures too big for the atlas, each to a texture of its own: which, how big, what.
+    pending_pictures: Vec<(u32, (u32, u32), Vec<u8>)>,
+    /// The last picture number handed out; 0 is the atlas.
+    last_picture: u32,
     /// How many real pixels per logical pixel it is painted at: that of the finest sheet.
     scale: f32,
     exhausted: bool,
@@ -234,7 +240,7 @@ impl Typesetter {
         let t0 = std::time::Instant::now();
         let fonts = FontSystem::new();
         println!("text   · {} system fonts in {} ms", fonts.db().len(), t0.elapsed().as_millis());
-        Typesetter { fonts, swash: SwashCache::new(), shelves: Shelves::new(), glyphs: HashMap::new(), pending_upload: Vec::new(), pending_fit: Vec::new(), scale: 1.0, exhausted: false, frames: HashMap::new(), fonts_read: HashSet::new() }
+        Typesetter { fonts, swash: SwashCache::new(), shelves: Shelves::new(), glyphs: HashMap::new(), pending_upload: Vec::new(), pending_fit: Vec::new(), pending_pictures: Vec::new(), last_picture: 0, scale: 1.0, exhausted: false, frames: HashMap::new(), fonts_read: HashSet::new() }
     }
 
     /// When the scale changes, everything painted stops being valid.
@@ -244,6 +250,7 @@ impl Typesetter {
         self.glyphs.clear();
         self.pending_upload.clear();
         self.pending_fit.clear();
+        self.pending_pictures.clear();
         self.exhausted = false;
         self.frames.clear();
     }
@@ -379,7 +386,7 @@ impl Typesetter {
     fn upload(&mut self, slot: AtlasSlot, rgba: Vec<u8>) {
         // Reused atlas pixels need fresh transparent gutters too; otherwise
         // linear filtering picks up ink from the previous generation.
-        let padded = AtlasSlot { x: slot.x - 1, y: slot.y - 1, width: slot.width + 2, height: slot.height + 2 };
+        let padded = AtlasSlot { x: slot.x - 1, y: slot.y - 1, width: slot.width + 2, height: slot.height + 2, page: 0 };
         let stride = padded.width as usize * 4;
         let mut pixels = vec![0; stride * padded.height as usize];
         for (y, row) in rgba.chunks_exact(slot.width as usize * 4).enumerate() {
@@ -389,14 +396,66 @@ impl Typesetter {
         self.pending_upload.push((padded, pixels));
     }
 
+    /// A picture too big for the atlas, to a texture of its own. With `into`,
+    /// a new version of one: into the same texture, if it is as big.
+    fn picture(&mut self, px: (u32, u32), rgba: Vec<u8>, into: Option<AtlasSlot>) -> AtlasSlot {
+        let page = match into {
+            Some(s) if s.page > 0 && (s.width, s.height) == px => s.page,
+            _ => {
+                self.last_picture += 1;
+                self.last_picture
+            }
+        };
+        self.pending_pictures.push((page, px, rgba));
+        AtlasSlot { x: 0, y: 0, width: px.0, height: px.1, page }
+    }
+
+    /// The real pixels an image asks for, and whether that is too big for the
+    /// atlas: then it is a picture of its own (`picture_px`). Declared `0, 0`,
+    /// the file's own: its pixels, or an SVG's size times the scale.
+    fn image_px(&self, path: Option<&std::path::Path>, (w, h): (u32, u32), budget: u64) -> ((u32, u32), bool) {
+        let px = if (w, h) == (0, 0) {
+            fit_within(path.and_then(|p| self.own_px(p)).unwrap_or((1, 1)), self.shelves.most)
+        } else {
+            (((w as f32) * self.scale).round().max(1.0) as u32, ((h as f32) * self.scale).round().max(1.0) as u32)
+        };
+        let big = px.0 > ATLAS_SIZE - 2 || px.1 > ATLAS_SIZE - 2 || px.0 as u64 * px.1 as u64 > budget;
+        (px, big)
+    }
+
+    fn own_px(&self, path: &std::path::Path) -> Option<(u32, u32)> {
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
+            let tree = resvg::usvg::Tree::from_data(&std::fs::read(path).ok()?, &resvg::usvg::Options::default()).ok()?;
+            let s = tree.size();
+            return Some(((s.width() * self.scale).round().max(1.0) as u32, (s.height() * self.scale).round().max(1.0) as u32));
+        }
+        image::image_dimensions(path).ok().filter(|&(w, h)| w > 0 && h > 0)
+    }
+
+    /// A picture of its own keeps the file's pixels: its box, the shape it
+    /// was declared with, as big as the picture fits in it at one pixel per
+    /// pixel. Never made bigger here (filtering on the card does that as
+    /// well), only smaller if it is bigger than it is ever painted, and no
+    /// bigger than the card allows. An SVG has no pixels: painted at `want`.
+    fn picture_px(&self, path: &std::path::Path, want: (u32, u32)) -> (u32, u32) {
+        let svg = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+        let px = match image::image_dimensions(path) {
+            Ok((w, h)) if !svg => {
+                let k = (w as f32 / want.0 as f32).min(h as f32 / want.1 as f32).min(1.0);
+                (((want.0 as f32) * k).round().max(1.0) as u32, ((want.1 as f32) * k).round().max(1.0) as u32)
+            }
+            _ => want,
+        };
+        fit_within(px, self.shelves.most)
+    }
+
     /// A scene's images, at the logical size they ask for times the scale. An
     /// SVG is painted at that exact size; a PNG is scaled down if it is too big.
     fn load_images(&mut self, images: &[(ImageSource, (u32, u32))]) -> (Vec<Option<AtlasSlot>>, Vec<Option<Animation>>) {
         let mut animations = Vec::with_capacity(images.len());
         let slots = images
             .iter()
-            .map(|(source, (w, h))| {
-                let px = fit_side((((*w as f32) * self.scale).round().max(1.0) as u32, ((*h as f32) * self.scale).round().max(1.0) as u32));
+            .map(|(source, size)| {
                 let path = match source {
                     ImageSource::File(r) | ImageSource::Pixels(r) => Some(r.clone()),
                     ImageSource::Icon(name) => crate::platform::icon(name),
@@ -406,6 +465,8 @@ impl Typesetter {
                         return None;
                     }
                 };
+                let (big_px, big) = self.image_px(path.as_deref(), *size, u64::MAX);
+                let px = fit_side(big_px);
                 // A file that moves —a GIF, an animated PNG or WebP—: each frame to
                 // the atlas, with the moment it ends.
                 let sharp = matches!(source, ImageSource::Pixels(_));
@@ -425,12 +486,19 @@ impl Typesetter {
                     return first;
                 }
                 animations.push(None);
+                let px = match (big, &path) {
+                    (true, Some(r)) => self.picture_px(r, big_px),
+                    _ => px,
+                };
                 // One that does not fit is not reported here: the atlas is rebuilt,
                 // taller if it may be, and only what still does not fit is said.
                 let Some(rgba) = path.as_ref().and_then(|r| rasterize_image(r, px, sharp)) else {
                     eprintln!("image  · cannot load {source:?}");
                     return None;
                 };
+                if big {
+                    return Some(self.picture(px, rgba, None));
+                }
                 let slot = self.reserve(px.0, px.1)?;
                 self.upload(slot, rgba);
                 Some(slot)
@@ -439,9 +507,8 @@ impl Typesetter {
         (slots, animations)
     }
 
-    /// How many real pixels a live image takes: its size times the scale, but
-    /// never more than a quarter of the atlas —a wallpaper asked for at a
-    /// monitor's size is shown a little softer rather than not at all—.
+    /// How many real pixels a live window's frame takes in the atlas: its size
+    /// times the scale, but never more than a quarter of it.
     fn live_px(&self, (w, h): (u32, u32)) -> (u32, u32) {
         let (w, h) = (((w as f32) * self.scale).max(1.0), ((h as f32) * self.scale).max(1.0));
         let edge = (ATLAS_SIZE - 2) as f32;
@@ -451,15 +518,21 @@ impl Typesetter {
 
     /// An image some data has asked for: an icon by its name, or a path.
     /// With `into`, a new version of one already loaded, painted over it.
+    /// One bigger than a quarter of the atlas (a wallpaper at a monitor's
+    /// size) is a picture of its own.
     fn load_live(&mut self, name: &str, size: (u32, u32), into: Option<AtlasSlot>) -> Option<AtlasSlot> {
-        let px = self.live_px(size);
         if name.starts_with("thumbnails:") || name.starts_with("capture:") {
-            return self.load_frame(name, size, px, into);
+            return self.load_frame(name, size, self.live_px(size), into);
         }
-        let path = if std::path::Path::new(name).is_absolute() { Some(std::path::PathBuf::from(name)) } else { crate::platform::icon(name) };
-        let rgba = rasterize_image(&path?, px, false)?;
+        let path = if std::path::Path::new(name).is_absolute() { Some(std::path::PathBuf::from(name)) } else { crate::platform::icon(name) }?;
+        let (px, big) = self.image_px(Some(&path), size, LIVE_BUDGET);
+        let px = if big { self.picture_px(&path, px) } else { px };
+        let rgba = rasterize_image(&path, px, false)?;
+        if big {
+            return Some(self.picture(px, rgba, into));
+        }
         let slot = match into {
-            Some(s) if (s.width, s.height) == px => s,
+            Some(s) if s.page == 0 && (s.width, s.height) == px => s,
             _ => self.reserve(px.0, px.1)?,
         };
         self.upload(slot, rgba);
@@ -562,7 +635,7 @@ impl Typesetter {
                 Delivery::Rebuilt { snapshot, working, generation }
             }
         };
-        Some(Parcel { delivery, pending_upload: std::mem::take(&mut self.pending_upload), pending_fit: std::mem::take(&mut self.pending_fit), exhausted: self.exhausted, height: self.shelves.height, most: self.shelves.most })
+        Some(Parcel { delivery, pending_upload: std::mem::take(&mut self.pending_upload), pending_fit: std::mem::take(&mut self.pending_fit), pending_pictures: std::mem::take(&mut self.pending_pictures), exhausted: self.exhausted, height: self.shelves.height, most: self.shelves.most })
     }
 }
 
@@ -617,6 +690,7 @@ pub struct Parcel {
     pub delivery: Delivery,
     pub pending_upload: Vec<(AtlasSlot, Vec<u8>)>,
     pub pending_fit: Vec<Fit>,
+    pub pending_pictures: Vec<(u32, (u32, u32), Vec<u8>)>,
     pub exhausted: bool,
     /// How tall the atlas the workshop paints into is, and the most it let it grow.
     pub height: u32,
@@ -646,6 +720,13 @@ pub struct Texts {
     last_live: HashMap<usize, AtlasSlot>,
     pub pending_upload: Vec<(AtlasSlot, Vec<u8>)>,
     pub pending_fit: Vec<Fit>,
+    /// Pictures of their own to make or paint again on the card, and those to let go.
+    pub pending_pictures: Vec<(u32, (u32, u32), Vec<u8>)>,
+    pub dropped_pictures: Vec<u32>,
+    /// The pictures of their own the card has been given and not told to let go.
+    pictures: HashSet<u32>,
+    /// How many frames in a row each live image that is a picture of its own has not been seen.
+    unseen: HashMap<LiveKey, u32>,
     generation: u32,
     scale: f32,
     working: WorkingSet,
@@ -680,7 +761,7 @@ impl Texts {
     }
 
     fn new(to_workshop: Sender<Job>) -> Self {
-        Texts { to_workshop, layouts: HashMap::new(), requested: HashSet::new(), last: HashMap::new(), images: Vec::new(), animations: Vec::new(), sources: Vec::new(), live: HashMap::new(), live_requested: HashSet::new(), live_version: HashMap::new(), last_live: HashMap::new(), pending_upload: Vec::new(), pending_fit: Vec::new(), generation: 0, scale: 1.0, working: WorkingSet::default(), exhausted: false, rebuilding: false, too_large: None, height: ATLAS_SIZE, most: ATLAS_SIZE }
+        Texts { to_workshop, layouts: HashMap::new(), requested: HashSet::new(), last: HashMap::new(), images: Vec::new(), animations: Vec::new(), sources: Vec::new(), live: HashMap::new(), live_requested: HashSet::new(), live_version: HashMap::new(), last_live: HashMap::new(), pending_upload: Vec::new(), pending_fit: Vec::new(), pending_pictures: Vec::new(), dropped_pictures: Vec::new(), pictures: HashSet::new(), unseen: HashMap::new(), generation: 0, scale: 1.0, working: WorkingSet::default(), exhausted: false, rebuilding: false, too_large: None, height: ATLAS_SIZE, most: ATLAS_SIZE }
     }
 
     pub fn scale(&self) -> f32 {
@@ -727,6 +808,9 @@ impl Texts {
         self.last_live.clear();
         self.pending_upload.clear();
         self.pending_fit.clear();
+        self.pending_pictures.clear();
+        self.unseen.clear();
+        self.sweep_pictures();
         self.working = WorkingSet::default();
         self.exhausted = false;
         self.rebuilding = false;
@@ -759,6 +843,8 @@ impl Texts {
         }
         self.pending_upload.extend(p.pending_upload);
         self.pending_fit.extend(p.pending_fit);
+        self.pictures.extend(p.pending_pictures.iter().map(|(page, ..)| *page));
+        self.pending_pictures.extend(p.pending_pictures);
         match p.delivery {
             Delivery::Layout { key, layout, .. } => {
                 self.requested.remove(&key);
@@ -800,6 +886,19 @@ impl Texts {
                 }
             }
         }
+        self.sweep_pictures();
+    }
+
+    /// The pictures of their own nothing shows any more, nor will while it is
+    /// on its way, are let go: each one is megabytes on the card.
+    fn sweep_pictures(&mut self) {
+        let mut used: HashSet<u32> = self.pending_pictures.iter().map(|(page, ..)| *page).collect();
+        used.extend(self.images.iter().chain(self.live.values()).flatten().chain(self.last_live.values()).map(|s| s.page));
+        let gone: Vec<u32> = self.pictures.iter().copied().filter(|p| !used.contains(p)).collect();
+        for page in gone {
+            self.pictures.remove(&page);
+            self.dropped_pictures.push(page);
+        }
     }
 
     pub fn begin_frame(&mut self) {
@@ -808,6 +907,29 @@ impl Texts {
     }
 
     pub fn end_frame(&mut self) {
+        // A live picture of its own not seen for a while (the wallpaper that
+        // faded out) is forgotten, and asked for again if it comes back.
+        let seen: HashSet<LiveKey> = self.working.live.iter().map(|(name, size)| (live_name(name).0.to_owned(), *size)).collect();
+        let mut forgotten = Vec::new();
+        for (key, slot) in &self.live {
+            let Some(page) = slot.filter(|s| s.page > 0).map(|s| s.page) else { continue };
+            let n = self.unseen.entry(key.clone()).or_insert(0);
+            *n = if seen.contains(key) { 0 } else { *n + 1 };
+            if *n > UNSEEN_FRAMES {
+                forgotten.push((key.clone(), page));
+            }
+        }
+        let live = &self.live;
+        self.unseen.retain(|k, _| live.contains_key(k));
+        if !forgotten.is_empty() {
+            for (key, page) in forgotten {
+                self.live.remove(&key);
+                self.live_version.remove(&key);
+                self.unseen.remove(&key);
+                self.last_live.retain(|_, s| s.page != page);
+            }
+            self.sweep_pictures();
+        }
         if self.exhausted && !self.rebuilding && self.too_large.as_ref() != Some(&self.working) {
             self.generation += 1;
             self.rebuilding = true;
@@ -903,6 +1025,9 @@ const ANIMATION_BUDGET: u64 = (ATLAS_SIZE as u64 * ATLAS_SIZE as u64) / 4;
 /// The most one live image takes, in real pixels: a quarter of the atlas too.
 const LIVE_BUDGET: u64 = (ATLAS_SIZE as u64 * ATLAS_SIZE as u64) / 4;
 
+/// How many frames a live picture of its own goes unseen before it is let go.
+const UNSEEN_FRAMES: u32 = 120;
+
 /// A GIF, an animated PNG or an animated WebP, frame by frame, fitted like
 /// `rasterize_image` and premultiplied, each with how long it lasts. `None`
 /// for anything else, or for one with a single frame.
@@ -987,8 +1112,8 @@ impl Fit {
         let (fw, fh) = (frame.width.max(1), frame.height.max(1));
         let k = (px.0 as f32 / fw as f32).min(px.1 as f32 / fh as f32);
         let (w, h) = (((fw as f32 * k).round() as u32).clamp(1, px.0), ((fh as f32 * k).round() as u32).clamp(1, px.1));
-        let inner = AtlasSlot { x: slot.x + (px.0 - w) / 2, y: slot.y + (px.1 - h) / 2, width: w, height: h };
-        Fit { padded: AtlasSlot { x: slot.x - 1, y: slot.y - 1, width: slot.width + 2, height: slot.height + 2 }, inner, frame }
+        let inner = AtlasSlot { x: slot.x + (px.0 - w) / 2, y: slot.y + (px.1 - h) / 2, width: w, height: h, page: 0 };
+        Fit { padded: AtlasSlot { x: slot.x - 1, y: slot.y - 1, width: slot.width + 2, height: slot.height + 2, page: 0 }, inner, frame }
     }
 }
 
@@ -1050,8 +1175,12 @@ fn fit_frame(f: &crate::platform::ThumbnailFrame, px: (u32, u32)) -> Vec<u8> {
 /// No side longer than the atlas holds: one that asks for more —a sheet as
 /// wide as the atlas, any big picture at a scale of 2— is made smaller, the
 /// same shape, and shown a little softer rather than not at all.
-fn fit_side((w, h): (u32, u32)) -> (u32, u32) {
-    let edge = ATLAS_SIZE - 2;
+fn fit_side(px: (u32, u32)) -> (u32, u32) {
+    fit_within(px, ATLAS_SIZE - 2)
+}
+
+/// No side longer than `edge`, the same shape.
+fn fit_within((w, h): (u32, u32), edge: u32) -> (u32, u32) {
     if w <= edge && h <= edge {
         return (w, h);
     }
@@ -1213,7 +1342,7 @@ mod tests {
         let (send, _jobs) = channel();
         let mut texts = Texts::new(send);
         texts.generation = 5;
-        texts.receive(Parcel { delivery: Delivery::Live { name: "x".into(), size: (1, 1), slot: None, generation: 4 }, pending_upload: Vec::new(), pending_fit: Vec::new(), exhausted: false, height: 4096, most: ATLAS_SIZE });
+        texts.receive(Parcel { delivery: Delivery::Live { name: "x".into(), size: (1, 1), slot: None, generation: 4 }, pending_upload: Vec::new(), pending_fit: Vec::new(), pending_pictures: Vec::new(), exhausted: false, height: 4096, most: ATLAS_SIZE });
         assert_eq!(texts.atlas_height(), 4096);
         texts.too_large = Some(WorkingSet::default());
         texts.allow_atlas(8192);
@@ -1223,7 +1352,7 @@ mod tests {
         texts.rebuilding = true;
         let snapshot = Snapshot { layouts: HashMap::new(), images: Vec::new(), animations: Vec::new(), live: HashMap::new() };
         let generation = texts.generation;
-        texts.receive(Parcel { delivery: Delivery::Rebuilt { snapshot, working: WorkingSet::default(), generation }, pending_upload: Vec::new(), pending_fit: Vec::new(), exhausted: true, height: ATLAS_SIZE, most: ATLAS_SIZE });
+        texts.receive(Parcel { delivery: Delivery::Rebuilt { snapshot, working: WorkingSet::default(), generation }, pending_upload: Vec::new(), pending_fit: Vec::new(), pending_pictures: Vec::new(), exhausted: true, height: ATLAS_SIZE, most: ATLAS_SIZE });
         assert!(texts.exhausted && texts.too_large.is_none() && !texts.rebuilding);
     }
 
@@ -1333,6 +1462,55 @@ mod tests {
         }
         assert!(texts.generation >= initial + 3, "fixture did not exhaust the atlas repeatedly");
         std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn a_wallpaper_is_a_picture_of_its_own_at_full_size_and_let_go_when_unseen() {
+        let dir = std::env::temp_dir().join(format!("pleamar-pictures-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let wall = |i: usize| {
+            let path = dir.join(format!("wall {i}.svg"));
+            std::fs::write(&path, r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="9"><rect width="16" height="9" fill="blue"/></svg>"#).unwrap();
+            path.to_str().unwrap().to_owned()
+        };
+        let (send, jobs) = channel();
+        let mut texts = Texts::new(send);
+        let mut t = Typesetter::new();
+        t.work(Job::Limit(8192));
+        texts.reset(1.0, &[(ImageSource::Live(crate::scene::TextId(0)), (4128, 2322))], &[]);
+        deliver(&mut t, &mut texts, &jobs);
+        let frame = |texts: &mut Texts, t: &mut Typesetter, names: &[String]| {
+            texts.begin_frame();
+            let slot = texts.image(0, names);
+            texts.end_frame();
+            deliver(t, texts, &jobs);
+            slot
+        };
+        let first = [wall(0)];
+        frame(&mut texts, &mut t, &first);
+        let slot = frame(&mut texts, &mut t, &first).expect("loaded");
+        assert!(slot.page > 0 && (slot.width, slot.height) == (4128, 2322), "the whole of it, not shrunk to the atlas");
+        let (page, size, rgba) = texts.pending_pictures.pop().expect("handed to the card");
+        assert_eq!((page, size, rgba.len()), (slot.page, (4128, 2322), 4128 * 2322 * 4));
+        // Another one in its place: the first is let go once it has gone unseen a while.
+        let second = [wall(1)];
+        for _ in 0..UNSEEN_FRAMES + 4 {
+            frame(&mut texts, &mut t, &second);
+        }
+        assert!(texts.dropped_pictures.contains(&slot.page));
+        assert!(frame(&mut texts, &mut t, &second).is_some_and(|s| s.page > slot.page));
+        assert!(texts.atlas_height() == ATLAS_SIZE && !texts.exhausted, "the atlas never saw it");
+        // A photo keeps its own pixels: not made bigger to what was declared,
+        // and made smaller only to it.
+        let photo = dir.join("photo.png");
+        image::RgbaImage::new(3840, 2160).save(&photo).unwrap();
+        assert_eq!(t.picture_px(&photo, (4128, 2322)), (3840, 2160));
+        assert_eq!(t.picture_px(&photo, (2752, 1548)), (2752, 1548));
+        assert_eq!(t.picture_px(&photo, (4128, 1728)), (3840, 1607), "the box keeps its shape");
+        // Declared `0, 0`: the file's own size and shape, whatever the scale.
+        t.clear(1.5);
+        assert_eq!(t.image_px(Some(&photo), (0, 0), LIVE_BUDGET), ((3840, 2160), true));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

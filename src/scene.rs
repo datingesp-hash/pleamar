@@ -1234,7 +1234,8 @@ pub enum Instr {
     /// `cell`: the image is a sheet of pictures in a grid, and only one is
     /// drawn —which one (counted along the rows, from 0), and how many
     /// columns and rows the sheet has—.
-    Image { image: ImageId, target: (Expr, Expr, Expr, Expr), alpha: Expr, tint: Option<Color>, cell: Option<(Expr, Expr, Expr)> },
+    /// `fit`: 0 stretched to its box, 1 whole inside it, 2 cut to cover it (`IMAGE_FITS`).
+    Image { image: ImageId, target: (Expr, Expr, Expr, Expr), alpha: Expr, tint: Option<Color>, cell: Option<(Expr, Expr, Expr)>, fit: u8 },
     /// Another program's window, from the compositor inside the scene
     /// (`windows`): what it last drew, stretched over `target` (x, y, width,
     /// height). `ask` is the size it is told to have; while the box travels on

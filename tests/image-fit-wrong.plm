@@ -1,0 +1,7 @@
+// expect: error «how an image fills its box»
+// `fit` is fill, contain or cover.
+scene ImageFitWrong {
+    surface { size: 300, 160 }
+    image pic = file "pic.png", 64, 64
+    image pic { at: 20, 20; size: 64, 64; fit: crop }
+}

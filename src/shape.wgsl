@@ -74,6 +74,9 @@ const FAR: f32 = 1e6;
 @group(0) @binding(5) var<storage, read> stops: array<vec4<f32>>;
 // The windows of the scene's compositor (`windows`), one per layer.
 @group(0) @binding(6) var windows: texture_2d_array<f32>;
+// A picture too big for the atlas, a texture of its own: bound only while
+// the element that shows it is drawn.
+@group(0) @binding(7) var picture: texture_2d<f32>;
 // 2 · what belongs to each surface: its size and its scale.
 @group(2) @binding(0) var<uniform> u: U;
 // Groups with opacity are painted separately, here, and blended at once.
@@ -388,7 +391,13 @@ fn fs(e: VertexOut) -> @location(0) vec4<f32> {
         }
         var at = mix(el.uv.xy, el.uv.zw, uv01);
         if (el.color1.x > 0.5) { at = sharp_texel(el, at); }
-        let t = textureSampleLevel(atlas, atlas_sampler, at / vec2<f32>(textureDimensions(atlas)), 0.0);
+        // Above 0 in the second slot: a picture of its own, not a piece of the atlas.
+        var t: vec4<f32>;
+        if (el.header.y > 0.5) {
+            t = textureSampleLevel(picture, atlas_sampler, at / vec2<f32>(textureDimensions(picture)), 0.0);
+        } else {
+            t = textureSampleLevel(atlas, atlas_sampler, at / vec2<f32>(textureDimensions(atlas)), 0.0);
+        }
         // Tinted: the piece is a mask —a letter (2), a symbolic icon (1)— and the element provides the colour.
         // A letter (2) gets its edges firmed up. Blended as they are, in sRGB,
         // a stem that falls across two pixels —most of them: the letters are

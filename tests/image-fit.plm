@@ -1,0 +1,10 @@
+// expect: ok
+// A wallpaper at its file's own pixels (`0, 0`), cut to cover each monitor
+// whatever its shape, and the same picture whole inside a card.
+scene ImageFit {
+    surface { size: full, full; level: background; screens: each }
+    text wall = "/tmp/wall.jpg"
+    image back = from wall, 0, 0
+    image back { at: 0, 0; size: screen.width, screen.height; fit: cover }
+    image back { at: 20, 20; size: 300, 300; fit: contain }
+}

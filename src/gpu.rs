@@ -100,6 +100,9 @@ pub struct DrawList {
     pub particle_marks: Vec<(u32, u32)>,
     /// The elements that blend another way: which one, and how (2 screen, 3 multiply).
     pub blend_marks: Vec<(u32, u8)>,
+    /// The images that are pictures of their own, not pieces of the atlas:
+    /// which element, and which picture. Each is drawn with its texture bound.
+    pub picture_marks: Vec<(u32, u32)>,
     /// Where a glass that bends what is behind it starts among the elements:
     /// where a scene that is the whole screen takes what it has painted so far
     /// as what is behind (`lens::Own`).
@@ -949,6 +952,7 @@ impl DrawList {
         self.offscreen_groups.clear();
         self.particle_marks.clear();
         self.blend_marks.clear();
+        self.picture_marks.clear();
         self.glass_marks.clear();
         self.particles_alive = false;
         self.wake_at = None;
@@ -1389,7 +1393,7 @@ impl DrawList {
                         glass_options(e, glass_spec.as_ref(), b, c);
                     });
                 }
-                Instr::Image { image, target, alpha, tint, cell } => {
+                Instr::Image { image, target, alpha, tint, cell, fit } => {
                     let a = alpha.eval(c).clamp(0.0, 1.0) * mult;
                     // What is not seen does not move either: no frame, no waking up.
                     if a <= 0.001 {
@@ -1411,9 +1415,29 @@ impl DrawList {
                         let (w, h) = ((uv[2] - uv[0]) / columns, (uv[3] - uv[1]) / rows);
                         uv = [uv[0] + x * w, uv[1] + y * h, uv[0] + (x + 1.0) * w, uv[1] + (y + 1.0) * h];
                     }
+                    // Not stretched: the picture's shape kept, whole inside its box
+                    // (the box made smaller) or covering it (the picture cut).
+                    let mut d = d;
+                    let (pw, ph) = (uv[2] - uv[0], uv[3] - uv[1]);
+                    if *fit > 0 && pw > 0.0 && ph > 0.0 && d[2] > 0.0 && d[3] > 0.0 {
+                        let k = (pw / ph) / (d[2] / d[3]);
+                        match (*fit, k > 1.0) {
+                            (1, true) => (d[1], d[3]) = (d[1] + (d[3] - d[3] / k) * 0.5, d[3] / k),
+                            (1, false) => (d[0], d[2]) = (d[0] + (d[2] - d[2] * k) * 0.5, d[2] * k),
+                            (_, true) => (uv[0], uv[2]) = (uv[0] + (pw - pw / k) * 0.5, uv[0] + (pw + pw / k) * 0.5),
+                            (_, false) => (uv[1], uv[3]) = (uv[1] + (ph - ph * k) * 0.5, uv[1] + (ph + ph * k) * 0.5),
+                        }
+                    }
                     // Pixel art stays pixels however a group enlarges it.
                     let sharp = tip.is_pixel_art(image.0 as usize);
+                    let at = self.element_count();
                     self.sprite(d, uv, a, rgb, false, sharp, affine, &clips);
+                    // A picture of its own: its number in the second slot, for the
+                    // shader and so a new one is a change, and drawn with it bound.
+                    if slot.page > 0 && self.element_count() > at {
+                        self.elements[at * PER_ELEMENT + 1] = slot.page as f32;
+                        self.picture_marks.push((at as u32, slot.page));
+                    }
                 }
                 Instr::Window { slot, target, alpha, ask } => {
                     let a = alpha.eval(c).clamp(0.0, 1.0) * mult;
@@ -2018,6 +2042,10 @@ pub struct Gpu {
     limit_warned: bool,
     scene_group: wgpu::BindGroup,
     no_layers_group: wgpu::BindGroup,
+    no_picture_view: wgpu::TextureView,
+    /// Pictures too big for the atlas, each a texture of its own, by number:
+    /// it, its view, and the scene's group with it as binding 7.
+    pictures: std::collections::HashMap<u32, (wgpu::Texture, wgpu::TextureView, wgpu::BindGroup)>,
 }
 
 impl Gpu {
@@ -2156,7 +2184,9 @@ impl Gpu {
         // grows taller only when what is seen does not fit (`fit_atlas`).
         let (atlas, atlas_view) = Self::atlas_texture(&device, ATLAS_SIZE);
         let (windows, windows_view) = Self::windows_texture(&device, (1, 1, 1));
-        let scene_group = Self::build_scene_group(&device, &pipeline, &shapes_buffer, &elements_buffer, &points_buffer, &stops_buffer, &atlas_view, &sampler, &windows_view);
+        // What binding 7 holds while no picture of its own is drawn.
+        let (_, no_picture_view) = Self::picture_texture(&device, (1, 1));
+        let scene_group = Self::build_scene_group(&device, &pipeline, &shapes_buffer, &elements_buffer, &points_buffer, &stops_buffer, &atlas_view, &sampler, &windows_view, &no_picture_view);
         let limit = device.limits().max_storage_buffer_binding_size as usize / 4;
         let no_layers_group = Self::make_layers(&device, &pipeline, format, 1, 1, 1).1;
         let erase = Self::erase_pipeline(&device, format);
@@ -2182,7 +2212,7 @@ impl Gpu {
         }).create_view(&Default::default());
         let no_backdrop_group = Self::build_backdrop_group(&device, &pipeline, &nothing, &nothing, &sampler);
         #[allow(unused_mut)]
-        let mut g = Gpu { _gl_instance: gl_instance, lens, blur, blur_sampler, blur_values: crate::blur::DEFAULT_VALUES, no_backdrop_group, can_copy, own_frames: Default::default(), adapter, device, queue, format, alpha, non_blocking, pipeline, particles, screen, multiply, erase, pipeline_layout, user_code: base, shapes_buffer, elements_buffer, points_buffer, stops_buffer, atlas, atlas_view, windows, windows_view, windows_dims: (1, 1, 1), #[cfg(target_os = "linux")] dmabufs: Default::default(), #[cfg(target_os = "linux")] copies: Default::default(), #[cfg(target_os = "linux")] yuv: None, #[cfg(target_os = "linux")] thumbs: Default::default(), #[cfg(target_os = "linux")] fit: None, #[cfg(target_os = "linux")] hash: None, #[cfg(target_os = "linux")] summer: None, last_submission: Default::default(), render_modifiers: Vec::new(), sampler, capacity: (INITIAL_SHAPES * PER_SHAPE, INITIAL_ELEMENTS * PER_ELEMENT, INITIAL_POINTS, INITIAL_STOPS), limit, limit_warned: false, scene_group, no_layers_group };
+        let mut g = Gpu { _gl_instance: gl_instance, lens, blur, blur_sampler, blur_values: crate::blur::DEFAULT_VALUES, no_backdrop_group, can_copy, own_frames: Default::default(), adapter, device, queue, format, alpha, non_blocking, pipeline, particles, screen, multiply, erase, pipeline_layout, user_code: base, shapes_buffer, elements_buffer, points_buffer, stops_buffer, atlas, atlas_view, windows, windows_view, windows_dims: (1, 1, 1), #[cfg(target_os = "linux")] dmabufs: Default::default(), #[cfg(target_os = "linux")] copies: Default::default(), #[cfg(target_os = "linux")] yuv: None, #[cfg(target_os = "linux")] thumbs: Default::default(), #[cfg(target_os = "linux")] fit: None, #[cfg(target_os = "linux")] hash: None, #[cfg(target_os = "linux")] summer: None, last_submission: Default::default(), render_modifiers: Vec::new(), sampler, capacity: (INITIAL_SHAPES * PER_SHAPE, INITIAL_ELEMENTS * PER_ELEMENT, INITIAL_POINTS, INITIAL_STOPS), limit, limit_warned: false, scene_group, no_layers_group, no_picture_view, pictures: Default::default() };
         #[cfg(target_os = "linux")]
         if first.is_none() {
             g.render_modifiers = g.bgra_modifiers(ash::vk::FormatFeatureFlags::COLOR_ATTACHMENT);
@@ -2207,7 +2237,7 @@ impl Gpu {
         };
         let sampler = |binding| wgpu::BindGroupLayoutEntry { binding, visibility: both, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None };
         let group = |label, entries: &[wgpu::BindGroupLayoutEntry]| d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries });
-        let scene = group("scene", &[storage(0), storage(1), texture(2, wgpu::TextureViewDimension::D2), sampler(3), storage(4), storage(5), texture(6, wgpu::TextureViewDimension::D2Array)]);
+        let scene = group("scene", &[storage(0), storage(1), texture(2, wgpu::TextureViewDimension::D2), sampler(3), storage(4), storage(5), texture(6, wgpu::TextureViewDimension::D2Array), texture(7, wgpu::TextureViewDimension::D2)]);
         let layers = group("layers", &[texture(0, wgpu::TextureViewDimension::D2Array)]);
         let uniforms = group("surface", &[wgpu::BindGroupLayoutEntry {
             binding: 0,
@@ -2439,7 +2469,7 @@ impl Gpu {
         self.queue.submit([enc.finish()]);
         self.atlas = atlas;
         self.atlas_view = view;
-        self.scene_group = Self::build_scene_group(&self.device, &self.pipeline, &self.shapes_buffer, &self.elements_buffer, &self.points_buffer, &self.stops_buffer, &self.atlas_view, &self.sampler, &self.windows_view);
+        self.rebind();
         println!("render · the atlas is now {ATLAS_SIZE}×{height}");
     }
 
@@ -2649,7 +2679,7 @@ impl Gpu {
         self.windows = t;
         self.windows_view = v;
         self.windows_dims = dims;
-        self.scene_group = Self::build_scene_group(&self.device, &self.pipeline, &self.shapes_buffer, &self.elements_buffer, &self.points_buffer, &self.stops_buffer, &self.atlas_view, &self.sampler, &self.windows_view);
+        self.rebind();
         true
     }
 
@@ -3127,7 +3157,7 @@ impl Gpu {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn build_scene_group(device: &wgpu::Device, pipeline: &wgpu::RenderPipeline, shapes: &wgpu::Buffer, elements: &wgpu::Buffer, points: &wgpu::Buffer, stops: &wgpu::Buffer, atlas: &wgpu::TextureView, sampler: &wgpu::Sampler, windows: &wgpu::TextureView) -> wgpu::BindGroup {
+    fn build_scene_group(device: &wgpu::Device, pipeline: &wgpu::RenderPipeline, shapes: &wgpu::Buffer, elements: &wgpu::Buffer, points: &wgpu::Buffer, stops: &wgpu::Buffer, atlas: &wgpu::TextureView, sampler: &wgpu::Sampler, windows: &wgpu::TextureView, picture: &wgpu::TextureView) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &pipeline.get_bind_group_layout(0),
@@ -3139,8 +3169,59 @@ impl Gpu {
                 wgpu::BindGroupEntry { binding: 4, resource: points.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: stops.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(windows) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(picture) },
             ],
         })
+    }
+
+    /// The scene's group, and one for each picture of its own: remade
+    /// whenever something they bind is.
+    fn rebind(&mut self) {
+        let group = |picture: &wgpu::TextureView| Self::build_scene_group(&self.device, &self.pipeline, &self.shapes_buffer, &self.elements_buffer, &self.points_buffer, &self.stops_buffer, &self.atlas_view, &self.sampler, &self.windows_view, picture);
+        self.scene_group = group(&self.no_picture_view);
+        let groups: Vec<(u32, wgpu::BindGroup)> = self.pictures.iter().map(|(page, (_, view, _))| (*page, group(view))).collect();
+        for (page, g) in groups {
+            if let Some(p) = self.pictures.get_mut(&page) {
+                p.2 = g;
+            }
+        }
+    }
+
+    fn picture_texture(device: &wgpu::Device, (w, h): (u32, u32)) -> (wgpu::Texture, wgpu::TextureView) {
+        let t = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("picture"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let v = t.create_view(&Default::default());
+        (t, v)
+    }
+
+    /// The pictures of their own the workshop has let go, and those it has
+    /// painted: each to its texture, made anew only if it changed size.
+    pub fn upload_pictures(&mut self, pending: &mut Vec<(u32, (u32, u32), Vec<u8>)>, dropped: &mut Vec<u32>) {
+        for page in dropped.drain(..) {
+            self.pictures.remove(&page);
+        }
+        for (page, (w, h), rgba) in pending.drain(..) {
+            if self.pictures.get(&page).is_none_or(|(t, ..)| (t.width(), t.height()) != (w, h)) {
+                let (t, v) = Self::picture_texture(&self.device, (w, h));
+                let g = Self::build_scene_group(&self.device, &self.pipeline, &self.shapes_buffer, &self.elements_buffer, &self.points_buffer, &self.stops_buffer, &self.atlas_view, &self.sampler, &self.windows_view, &v);
+                self.pictures.insert(page, (t, v, g));
+            }
+            let (t, ..) = &self.pictures[&page];
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                &rgba,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * w), rows_per_image: None },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+        }
     }
 
     /// What is going to be painted, to the card. If it does not fit, the
@@ -3156,7 +3237,7 @@ impl Gpu {
                 if new.1 != self.capacity.1 { self.elements_buffer = store("elements", new.1) }
                 if new.2 != self.capacity.2 { self.points_buffer = store("points", new.2) }
                 if new.3 != self.capacity.3 { self.stops_buffer = store("stops", new.3) }
-                self.scene_group = Self::build_scene_group(&self.device, &self.pipeline, &self.shapes_buffer, &self.elements_buffer, &self.points_buffer, &self.stops_buffer, &self.atlas_view, &self.sampler, &self.windows_view);
+                self.rebind();
                 self.capacity = new;
                 println!("render · the scene has grown: now {} shapes and {} elements fit", new.0 / PER_SHAPE, new.1 / PER_ELEMENT);
             }
@@ -3410,6 +3491,7 @@ impl Gpu {
                 let mut from = t.start;
                 let mut special: Vec<(u32, u32, u8)> = d.particle_marks.iter().filter(|(at, _)| t.contains(at)).map(|&(at, n)| (at, n, 0)).collect();
                 special.extend(d.blend_marks.iter().filter(|(at, _)| t.contains(at)).map(|&(at, m)| (at, 1, m)));
+                special.extend(d.picture_marks.iter().filter(|(at, _)| t.contains(at)).map(|&(at, page)| (at, page, 4)));
                 special.sort_by_key(|s| s.0);
                 for (at, count, how) in special {
                     if at > from {
@@ -3419,6 +3501,14 @@ impl Gpu {
                         0 => {
                             pass.set_pipeline(&self.particles);
                             pass.draw(0..6, at * PARTICLE_SLOTS..at * PARTICLE_SLOTS + count);
+                        }
+                        // A picture of its own (`count`: which), with its texture bound.
+                        4 => {
+                            if let Some((.., group)) = self.pictures.get(&count) {
+                                pass.set_bind_group(0, group, &[]);
+                                pass.draw(0..6, at..at + 1);
+                                pass.set_bind_group(0, &self.scene_group, &[]);
+                            }
                         }
                         m => {
                             pass.set_pipeline(if m == 2 { &self.screen } else { &self.multiply });

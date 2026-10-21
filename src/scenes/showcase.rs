@@ -122,10 +122,10 @@ impl Script for Showcase {
         let svg = e.image(ImageSource::Icon("firefox".into()), 48, 48);
         let png = e.image(ImageSource::File("/usr/share/icons/hicolor/256x256/apps/firefox.png".into()), 48, 48);
         let symbol = e.image(ImageSource::Icon("audio-volume-high-symbolic".into()), 40, 40);
-        e.paint(Instr::Image { image: svg, target: (565.0.into(), 226.0.into(), 48.0.into(), 48.0.into()), alpha: 1.0.into(), tint: None, cell: None });
-        e.paint(Instr::Image { image: png, target: (620.0.into(), 226.0.into(), 48.0.into(), 48.0.into()), alpha: 1.0.into(), tint: None, cell: None });
+        e.paint(Instr::Image { image: svg, target: (565.0.into(), 226.0.into(), 48.0.into(), 48.0.into()), alpha: 1.0.into(), tint: None, cell: None, fit: 0 });
+        e.paint(Instr::Image { image: png, target: (620.0.into(), 226.0.into(), 48.0.into(), 48.0.into()), alpha: 1.0.into(), tint: None, cell: None, fit: 0 });
         e.paint(Instr::Transform(Some(Transform::at((585.0.into(), 292.0.into())).rotate(sway.e()))));
-        e.paint(Instr::Image { image: symbol, target: (565.0.into(), 272.0.into(), 40.0.into(), 40.0.into()), alpha: 1.0.into(), tint: Some(color(0.62, 0.84, 0.74)), cell: None });
+        e.paint(Instr::Image { image: symbol, target: (565.0.into(), 272.0.into(), 40.0.into(), 40.0.into()), alpha: 1.0.into(), tint: Some(color(0.62, 0.84, 0.74)), cell: None, fit: 0 });
         e.paint(Instr::Transform(None));
 
         // 7 · a box that grows with its label. The render measures the text and leaves the
