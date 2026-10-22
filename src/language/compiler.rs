@@ -176,6 +176,8 @@ struct Candidate {
     under: Vec<Transform>,
     forced: bool,
     cursor: Cursor,
+    /// `cursor:` with something that changes: worked out every frame instead.
+    cursor_when: Option<Expr>,
     /// What it carries when dragged out to another program (`carries:`).
     carries: Option<Content>,
     /// `carry_icon:`: the picture under the pointer while it is dragged out.
@@ -311,6 +313,8 @@ struct Compiler<'a> {
     hiding_noted: std::cell::RefCell<std::collections::HashSet<usize>>,
     /// Reading a text's `letter_*` property: `letter` and `letters` mean something.
     in_letters: std::cell::Cell<bool>,
+    /// Reading a `cursor:`: the cursors' names are their codes.
+    in_cursor: std::cell::Cell<bool>,
     /// `translations`: each language with its table, original → translated. And, per
     /// language, the texts found without a translation, to say so once at the end.
     translations: Vec<(String, HashMap<String, String>)>,
@@ -436,7 +440,7 @@ pub fn compile<'a>(tree: &'a [Entry], files: &'a [String], dirs: &'a [std::path:
             other => unreachable!("'{other}' is in the vocabulary, but it has no stiffness or damping"),
         })).collect(),
         under: Vec::new(), candidates: Vec::new(), zparents: vec![0], next_zparent: 1, zblock: None, rules: Vec::new(), errors: Vec::new(), declared: Vec::new(), used: Default::default(), current_class: String::new(),
-        scrolls: Vec::new(), row_scrolls: Default::default(), pending_surfaces: Vec::new(), pending_levels: Vec::new(), pending_reserves: Vec::new(), pending_rates: Vec::new(), hover_mentions: Default::default(), zone_springs: Vec::new(), pending_anchors: Vec::new(), files, dirs, strict_files, libraries, boundary_of: HashMap::new(), permissions_of: HashMap::new(), pass: 0, next_origin: 0.0, values: HashMap::new(), ambiguous: Default::default(), instance_children: Vec::new(), from_library: Default::default(), unrequested: Default::default(), unwatched: Default::default(), hiding_noted: Default::default(), in_letters: Default::default(), scopes: Vec::new(), components: HashMap::new(), copies: 0, let_props: HashMap::new(), copy_props: Default::default(), later_copy: false, effects_depth: 0, in_slot: false, last_size: None, imposed_measure: None, pending_keyboard: None, prop_sites: HashMap::new(),
+        scrolls: Vec::new(), row_scrolls: Default::default(), pending_surfaces: Vec::new(), pending_levels: Vec::new(), pending_reserves: Vec::new(), pending_rates: Vec::new(), hover_mentions: Default::default(), zone_springs: Vec::new(), pending_anchors: Vec::new(), files, dirs, strict_files, libraries, boundary_of: HashMap::new(), permissions_of: HashMap::new(), pass: 0, next_origin: 0.0, values: HashMap::new(), ambiguous: Default::default(), instance_children: Vec::new(), from_library: Default::default(), unrequested: Default::default(), unwatched: Default::default(), hiding_noted: Default::default(), in_letters: Default::default(), in_cursor: Default::default(), scopes: Vec::new(), components: HashMap::new(), copies: 0, let_props: HashMap::new(), copy_props: Default::default(), later_copy: false, effects_depth: 0, in_slot: false, last_size: None, imposed_measure: None, pending_keyboard: None, prop_sites: HashMap::new(),
     };
     // Two facts that always exist: what the surface really measures. The
     // render sets them when the compositor configures it.
@@ -1320,6 +1324,10 @@ impl<'a> Compiler<'a> {
                 match n.as_str() {
                     "true" => return Ok(Expr::K(1.0)),
                     "false" => return Ok(Expr::K(0.0)),
+                    // In a `cursor:`, the cursors' names are theirs before the scene's.
+                    _ if self.in_cursor.get() && vocab::CURSORS.contains(&n.as_str()) => {
+                        return Ok(Expr::K(Cursor::from_name(n).unwrap_or_default().code() as f32));
+                    }
                     "letter" if self.in_letters.get() => return Ok(Expr::Letter(0)),
                     "letters" if self.in_letters.get() => return Ok(Expr::Letter(1)),
                     "letter" | "letters" if !self.scopes.iter().any(|e| e.exprs.contains_key(n.as_str())) && !self.lets.contains_key(n.as_str()) && !self.props.contains_key(n.as_str()) && !self.facts.contains_key(n.as_str()) => {
@@ -1362,6 +1370,12 @@ impl<'a> Compiler<'a> {
                     Ok(Expr::K(k as f32))
                 } else if self.ambiguous.contains(n.as_str()) {
                     c.error(format!("'{n}' is a value of several enums, with different numbers: here there is no telling which. Compare it with its fact (`mode == {n}`) or write it in full (`mode.{n}`)"))
+                } else if self.in_cursor.get() {
+                    // Most likely a cursor's name, mistyped: the list is what helps.
+                    let all: Vec<String> = vocab::CURSORS.iter().map(|s| s.to_string()).collect();
+                    let hint = closest_match(n, all.iter()).map_or(String::new(), |p| format!(" Did you mean '{p}'?"));
+                    let t = &c.tokens[c.i - 1];
+                    Err(CompileError::at(t.line, t.col, format!("there is nothing called '{n}': in a `cursor:`, a cursor is {}.{hint}", join_or(vocab::CURSORS))))
                 } else {
                     let known: Vec<&String> = self.lets.keys().chain(self.props.keys()).chain(self.facts.keys()).chain(self.values.keys()).collect();
                     self.unknown(c, "nothing", n, known)
@@ -1429,6 +1443,9 @@ impl<'a> Compiler<'a> {
             // The condition is 1 or 0: choosing is mixing.
             "if" => {
                 let (cond, x, y) = (take()?, take()?, take()?);
+                // A cursor is one or the other, never a blend of their codes:
+                // a spring halfway gives the nearer one.
+                let cond = if self.in_cursor.get() { cond.gt(Expr::K(0.5)) } else { cond };
                 y.mix(x, cond)
             }
             "sqrt" => take()?.un(Un::Sqrt),
@@ -1630,9 +1647,9 @@ impl<'a> Compiler<'a> {
             Some(c) => Some(self.color(c)?),
             None => None,
         };
-        let cursor = match p.get_mut("cursor") {
-            Some(c) => read_cursor(c)?,
-            None => Cursor::Normal,
+        let (cursor, cursor_when) = match p.get_mut("cursor") {
+            Some(c) => self.cursor(c)?,
+            None => (Cursor::Normal, None),
         };
         // `carries: "file://{path}"`: dragged out of the scene, it goes to
         // another program as that (a file, a link, a text).
@@ -1801,7 +1818,7 @@ impl<'a> Compiler<'a> {
         // which it is painted. Whether it is or not is decided at the end: see `materialize_zones`.
         if let Some(name) = &name {
             let name = &self.declare_zone(name);
-            self.candidates.push(Candidate { name: name.clone(), at: self.e.instrs.len(), zblock: self.zblock, shape: shape.clone(), active, visible: None, under: self.under.clone(), forced: carries.is_some() || handle.is_some(), cursor, carries, carry_icon, label, reach, within: None, told, handle });
+            self.candidates.push(Candidate { name: name.clone(), at: self.e.instrs.len(), zblock: self.zblock, shape: shape.clone(), active, visible: None, under: self.under.clone(), forced: carries.is_some() || handle.is_some(), cursor, cursor_when, carries, carry_icon, label, reach, within: None, told, handle });
         }
         Ok(ParsedShape { shape, color, opacity, blend, size: extent, glass_spec })
     }
@@ -3604,7 +3621,7 @@ impl<'a> Compiler<'a> {
             at: self.e.instrs.len(),
             zblock: self.zblock,
             shape: Shape::Rect { center: (at.0.clone() + width.clone() * 0.5, at.1.clone() + height * 0.5), half_size: (width.clone() * 0.5, (height * 0.5 + 3.0).into()), radius: 0.0.into() },
-            active: None, visible: None, under: self.under.clone(), forced: true, cursor: Cursor::Text, carries: None, carry_icon: None, label, reach, within: None, told: None, handle: None,
+            active: None, visible: None, under: self.under.clone(), forced: true, cursor: Cursor::Text, cursor_when: None, carries: None, carry_icon: None, label, reach, within: None, told: None, handle: None,
         });
         self.last_size = Some((width.clone(), height.into()));
         self.e.paint(Instr::Field { text, zone: interned(&zone), at, width, style, alpha, placeholder, selection, secret, passive });
@@ -4937,9 +4954,9 @@ impl<'a> Compiler<'a> {
         let spring = if c.sym("~") { Some(self.spring(c)?) } else { None };
         c.expect_end()?;
         let mut p = self.properties(n, vocab::properties("layout"))?;
-        let stack_cursor = match p.get_mut("cursor") {
-            Some(c) => read_cursor(c)?,
-            None => Cursor::Normal,
+        let (stack_cursor, stack_cursor_when) = match p.get_mut("cursor") {
+            Some(c) => self.cursor(c)?,
+            None => (Cursor::Normal, None),
         };
         self.in_slot = false;
         let origin = match p.get_mut("at") {
@@ -5421,7 +5438,7 @@ impl<'a> Compiler<'a> {
                 under.push(t.clone());
             }
             let bounds = Shape::Rect { center: (size.0.clone() * 0.5, size.1.clone() * 0.5), half_size: (size.0.clone() * 0.5, size.1.clone() * 0.5), radius: zone_corner };
-            self.candidates.insert(base_candidates, Candidate { name: name.clone(), at: instr_base, zblock: self.zblock, shape: bounds, active: None, visible: None, under, forced: scroller.is_some(), cursor: stack_cursor, carries: None, carry_icon: None, label: None, reach: Reach::Any, within: None, told: None, handle: None });
+            self.candidates.insert(base_candidates, Candidate { name: name.clone(), at: instr_base, zblock: self.zblock, shape: bounds, active: None, visible: None, under, forced: scroller.is_some(), cursor: stack_cursor, cursor_when: stack_cursor_when, carries: None, carry_icon: None, label: None, reach: Reach::Any, within: None, told: None, handle: None });
             // A hidden stack does not catch the mouse: neither its children nor IT, which with
             // `view:` has a zone of its own —the one for the wheel and dragging— the
             // size of its window. Hidden and in front, that zone
@@ -6172,6 +6189,7 @@ impl<'a> Compiler<'a> {
             under: self.under.clone(),
             forced: true,
             cursor: Cursor::Normal,
+            cursor_when: None,
             carries: None,
             carry_icon: None,
             label: None,
@@ -6428,6 +6446,7 @@ impl<'a> Compiler<'a> {
                 };
                 let z = self.e.zone_under(interned(&k.name), k.shape, active, k.under);
                 self.e.zones[z.0 as usize].cursor = k.cursor;
+                self.e.zones[z.0 as usize].cursor_when = k.cursor_when;
                 self.e.zones[z.0 as usize].at = k.at;
                 self.e.zones[z.0 as usize].zblock = k.zblock;
                 self.e.zones[z.0 as usize].carries = k.carries;
@@ -6969,9 +6988,25 @@ fn reach(c: &mut Cur) -> R<Reach> {
     })
 }
 
-fn read_cursor(c: &mut Cur) -> R<Cursor> {
-    let name = c.one_of(vocab::CURSORS, "a cursor")?;
-    Ok(Cursor::from_name(&name).unwrap_or_default())
+impl Compiler<'_> {
+    /// `cursor: grab`, or one that changes: `cursor: if(held, grabbing, grab)`,
+    /// where each cursor's name is its code. A name alone is read as before, so
+    /// a mistyped one still gets the list of cursors.
+    fn cursor(&self, c: &mut Cur) -> R<(Cursor, Option<Expr>)> {
+        if matches!(c.peek(), Some(TokenKind::Id(_))) && c.i + 1 == c.tokens.len() {
+            let name = c.one_of(vocab::CURSORS, "a cursor")?;
+            return Ok((Cursor::from_name(&name).unwrap_or_default(), None));
+        }
+        self.in_cursor.set(true);
+        let e = self.expr(c);
+        self.in_cursor.set(false);
+        let e = e?;
+        c.expect_end()?;
+        Ok(match e {
+            Expr::K(v) => (Cursor::from_code(v.round().clamp(0.0, Cursor::LAST_CODE as f32) as u8), None),
+            e => (Cursor::Normal, Some(e)),
+        })
+    }
 }
 
 struct ParsedShape {

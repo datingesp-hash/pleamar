@@ -1,0 +1,7 @@
+// expect: error «Did you mean 'grabbing'?»
+language 0.4
+scene X {
+    surface { size: 100, 100 }
+    fact held = false
+    zone box handle { from: 0, 0; size: 100, 100; cursor: if(held, grabing, grab) }
+}

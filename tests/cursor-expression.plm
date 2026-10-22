@@ -1,0 +1,17 @@
+// expect: ok
+language 0.4
+// A cursor that changes while it runs: an open hand over the handle, a closed
+// one while it is held. It is read during the drag too, so the hand closes as
+// soon as the press takes it. `pointer.x` is still the mouse: only a bare
+// cursor name is the cursor.
+scene Held {
+    surface { size: 300, 100 }
+    fact held = false
+    fact tool: pick_it | type_it | busy = pick_it
+    zone box handle { from: 10, 10; size: 80, 80; cursor: if(held, grabbing, grab) }
+    on press handle { held = true }
+    on release handle { held = false }
+    zone box tools { from: 110, 10; size: 80, 80; cursor: pick(tool, pointer, text, wait) }
+    zone box edge { from: 210, 10; size: 80, 80; cursor: if(pointer.x > 250, e_resize, w_resize) }
+    box { from: 10, 10; size: 80, 80; color: if(held, #9ed6bd, #3a3b3b) }
+}

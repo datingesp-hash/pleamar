@@ -1354,6 +1354,9 @@ impl Cursor {
         }
     }
 
+    /// The highest code there is: the last of the named ones.
+    pub const LAST_CODE: u8 = (CURSOR_KINDS.len() + CURSOR_NAMES.len() - 1) as u8;
+
     pub fn from_code(code: u8) -> Cursor {
         match CURSOR_KINDS.get(code as usize) {
             Some(k) => k.0,
@@ -1371,6 +1374,10 @@ pub struct Zone {
     pub active: Expr,
     /// Which cursor is set when passing over it.
     pub cursor: Cursor,
+    /// `cursor: if(held, grabbing, grab)`: worked out every frame instead, to a
+    /// cursor's code (`Cursor::code`). Read while the zone is dragged too, so
+    /// the hand can close for as long as it holds something.
+    pub cursor_when: Option<Expr>,
     /// The transforms it lives under, from outside in: what is seen
     /// rotated is pressed rotated.
     pub under: Vec<Transform>,
@@ -1519,6 +1526,14 @@ impl Scene {
 }
 
 impl Zone {
+    /// The cursor over it now.
+    pub fn cursor_in(&self, c: Ctx) -> Cursor {
+        match &self.cursor_when {
+            Some(e) => Cursor::from_code(e.eval(c).round().clamp(0.0, Cursor::LAST_CODE as f32) as u8),
+            None => self.cursor,
+        }
+    }
+
     /// The box that contains it, to tell the compositor where the mouse comes in.
     pub fn bounds(&self, c: Ctx) -> Option<[f32; 4]> {
         let mut p = self.shape.flatten_into(c, &mut Vec::new());
@@ -2153,7 +2168,7 @@ impl Scene {
         self.zone_under(id, shape, active, vec![])
     }
     pub fn zone_under(&mut self, id: &'static str, shape: Shape, active: impl Into<Expr>, under: Vec<Transform>) -> ZoneId {
-        self.zones.push(Zone { id, shape, active: active.into(), cursor: Cursor::Normal, under, at: self.instrs.len(), zblock: None, carries: None, carry_icon: None, label: None, reach: Reach::Any, scrolls: None, within: None, told: None, handle: None });
+        self.zones.push(Zone { id, shape, active: active.into(), cursor: Cursor::Normal, cursor_when: None, under, at: self.instrs.len(), zblock: None, carries: None, carry_icon: None, label: None, reach: Reach::Any, scrolls: None, within: None, told: None, handle: None });
         ZoneId(self.zones.len() as u16 - 1)
     }
     /// Claims go from more to less priority; the last one should be
