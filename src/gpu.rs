@@ -305,6 +305,8 @@ pub struct PlacedField {
     /// Whether what is painted are dots: then a byte of the layout is not a
     /// byte of the text, and one has to go from one to the other by letter number.
     pub secret: bool,
+    /// Takes no keys: see `passive` in the language.
+    pub passive: bool,
 }
 
 /// The dot each letter of a secret field is painted with. It is three bytes
@@ -1525,7 +1527,7 @@ impl DrawList {
                         e[40] = corner;
                     });
                 }
-                Instr::Field { text, zone, at, width, style, alpha, placeholder, selection, secret } => {
+                Instr::Field { text, zone, at, width, style, alpha, placeholder, selection, secret, passive } => {
                     let k = text.0 as usize;
                     let real = texts.get(k).map_or("", String::as_str);
                     let empty = real.is_empty();
@@ -1545,7 +1547,7 @@ impl DrawList {
                     };
                     // If the cursor goes out on the right, the text scrolls.
                     let scroll = mine.map_or(0.0, |v| (x_at_byte(v.cursor) - w + 6.0).max(0.0));
-                    self.fields.push(PlacedField { text: k, zone, layout: if empty { None } else { m.clone() }, x0, scroll, secret: *secret });
+                    self.fields.push(PlacedField { text: k, zone, layout: if empty { None } else { m.clone() }, x0, scroll, secret: *secret, passive: *passive });
                     let a = alpha.eval(c).clamp(0.0, 1.0) * mult;
                     if a <= 0.001 {
                         continue;

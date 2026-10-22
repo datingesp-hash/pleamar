@@ -1957,7 +1957,7 @@ pub fn run(
             // shortcut— goes on to the rules and to the logic. Only a field that is
             // drawn now: a hidden one (a search that is closed) takes nothing, or
             // in a window manager no window could be typed into.
-            if let Some(ed) = editing.as_mut().filter(|e| draw.fields.iter().any(|f| f.text == e.field)) {
+            if let Some(ed) = editing.as_mut().filter(|e| draw.fields.iter().any(|f| f.text == e.field && !f.passive)) {
                 let k = ed.field;
                 match ed.handle_key(&mut texts[k], &name, typed.as_deref(), mods) {
                     KeyOutcome::Changed => {

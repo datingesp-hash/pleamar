@@ -1,0 +1,12 @@
+// expect: ok
+language 0.4
+// A field that only has the keyboard lent to the surface it is on: it takes no key, so the arrows reach the rules.
+scene Catcher {
+    surface { size: 300, 80; anchor: top; keyboard: on_demand }
+    text catch = ""
+    fact step = 0
+    on change step { }
+    on key Right { step = step + 1 }
+    input catch { at: 0, 0; width: 4; size: 10; color: #ffffff; opacity: 0; passive: true }
+    on key Tab { focus catch }
+}

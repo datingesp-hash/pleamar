@@ -533,7 +533,7 @@ Each element accepts these properties and no others; another one is an error, wi
 | `particles` | `at` · `area` · `count` · `life` · `speed` · `direction` · `spread` · `gravity` · `drag` · `size` · `colors` · `opacity` · `shape` · `emit` or `burst` · `show`: §8.3 |
 | `shader` | `at` (its top left corner) · `size: w, h` · `corner` · `opacity` · `show` · `values: a, b, …` (up to eight numbers, any expression) · `colors: c1, c2` (up to two). What it is and how it is written: §8.1 |
 | `figure` | `at` (where the piece's centre goes) · `size: w, h` or `scale:` (without either, one unit of the svg is one pixel) · `pivot: x, y` (in the svg's units, from its centre: the point it **turns** around, which does not move it) · `rotate` · `color` (instead of the one in the file) · `opacity` · `blend` · `stroke` · `show` |
-| `input` | `at` · `width` · `size` · `weight` · `color` · `opacity` · `family` · `placeholder` · `selection` · `secret` · `show` · `label` · `agent` |
+| `input` | `at` · `width` · `size` · `weight` · `color` · `opacity` · `family` · `placeholder` · `selection` · `secret` · `passive` · `show` · `label` · `agent` |
 | `group` | `pivot` · `rotate` · `scale: s` or `sx, sy` · `move: dx, dy` · `opacity` (they melt as a single thing) · `size` (for whoever lays it out) · `show` · `z` (see below) · and its **effects**: `blur` · `glow` · `saturation` · `brightness` · `contrast` · `hue` · `mask` · `mode` (§8.2) |
 | `popup` | `at` (inside the surface) · `size` · `open:` a fact |
 | `row` `column` | `at` · `anchor` · `gap` · `padding` · `align:` `start` `center` `end` · `fill` · `corner` · `opacity` · `cursor` · `show` · `size: w, h` · `view: w, h` · `step` · `content` · `wrap: n` |
@@ -1472,7 +1472,7 @@ scene Told {
 | `impulse prop -620` · `impulse pop left * 5` | a shove: it adds to the velocity of the spring. The amount is evaluated on firing, so it can depend on what is going on: a countdown's bounce shrinks with the number left |
 | `ripple zone` | a ring of light from the centre of that zone through the glass, without a press or a pointer move; nothing if the zone is hidden, inactive or off screen, or with reduced motion. A new ripple replaces the previous one. Naming a shape here makes it a zone, like any rule that names it: it stops the clicks under it |
 | `play gesture` | it asks for it; it will be granted or not, depending on its class |
-| `focus field` · `blur` | gives the writing cursor to an `input`, or takes it away |
+| `focus field` · `blur` | gives the writing cursor to an `input`, or takes it away. Focusing a field also has the compositor lend the keyboard to the surface (a launcher opened with a shortcut never gets it with `on_demand` otherwise), to the copy the field is on. An `input` with `passive: true` is only that: it takes no key, so the arrows, Tab and Enter still reach the rules |
 | `text = "words"` · `text = other` | a live text made that at once: words as written (no slots), or what another live text says then. `label = ""` empties it; `label = draft`, after an `input draft`, keeps what was written |
 
 A state change can give the same glass feedback as a click, entirely in the
@@ -1663,7 +1663,7 @@ properties.window: at size ask opacity show
 properties.figure: at size scale rotate pivot color opacity blend stroke show grow
 properties.shader: at size corner opacity show values colors grow
 properties.particles: at area count life speed direction spread gravity drag size colors opacity shape emit burst show
-properties.input: at width size weight color opacity family placeholder selection secret show label agent
+properties.input: at width size weight color opacity family placeholder selection secret passive show label agent
 properties.group: pivot rotate scale move opacity size show z grow span blur glow saturation brightness contrast hue mask mode shader
 properties.popup: at size open
 properties.children: move

@@ -3552,6 +3552,21 @@ impl<'a> Compiler<'a> {
             }
             None => false,
         };
+        // `passive: true`: a field that is only there to have the keyboard lent to the surface it is on
+        // (`focus` it), and takes nothing of what is typed: every key goes on to the rules and the logic,
+        // the arrows included. The loan goes to the copy the field is on and to no other.
+        let passive = match p.get_mut("passive") {
+            Some(c) => {
+                let v = c.id("true or false")?;
+                c.expect_end()?;
+                match v.as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => return c.error("`passive` is true or false"),
+                }
+            }
+            None => false,
+        };
         if secret {
             let mut s = crate::scene::SECRETS.lock().unwrap();
             let own = interned(&name);
@@ -3592,7 +3607,7 @@ impl<'a> Compiler<'a> {
             active: None, visible: None, under: self.under.clone(), forced: true, cursor: Cursor::Text, carries: None, carry_icon: None, label, reach, within: None, told: None, handle: None,
         });
         self.last_size = Some((width.clone(), height.into()));
-        self.e.paint(Instr::Field { text, zone: interned(&zone), at, width, style, alpha, placeholder, selection, secret });
+        self.e.paint(Instr::Field { text, zone: interned(&zone), at, width, style, alpha, placeholder, selection, secret, passive });
         Ok(())
     }
 
