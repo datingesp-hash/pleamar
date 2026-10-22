@@ -1228,7 +1228,7 @@ pub enum Instr {
     /// the name of the zone that focuses it when pressed.
     /// `secret`: what is typed is shown as dots, one per letter. The real
     /// text is still the live text; what changes is what gets painted.
-    Field { text: TextId, zone: &'static str, at: Point, width: Expr, style: Style, alpha: Expr, placeholder: Content, selection: Color, secret: bool },
+    Field { text: TextId, zone: &'static str, at: Point, width: Expr, style: Style, alpha: Expr, placeholder: Content, selection: Color, secret: bool, passive: bool },
     /// An image or an icon. With `tint`, its shape is painted in that color: what
     /// a symbolic icon wants.
     /// `cell`: the image is a sheet of pictures in a grid, and only one is
